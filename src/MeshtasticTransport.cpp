@@ -40,7 +40,7 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
 
 bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
                                size_t len, uint32_t to, uint8_t hopLimit,
-                               uint32_t requestId)
+                               uint32_t requestId, uint32_t replyId)
 {
     if (!_radio || len > sizeof(meshtastic_Data_payload_t::bytes))
         return false;
@@ -52,6 +52,7 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     data.payload.size = len;
     memcpy(data.payload.bytes, payload, len);
     data.request_id = requestId;
+    data.reply_id = replyId;
 
     uint8_t plain[MAX_PAYLOAD];
     pb_ostream_t os = pb_ostream_from_buffer(plain, sizeof(plain));

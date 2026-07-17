@@ -68,9 +68,11 @@ public:
     // requestId (0 = absent) fills Data.request_id — set it when this packet
     // answers another (ACKs, command responses).
     // Returns false on encode, size or radio error.
+    // replyId (0 = absent) fills Data.reply_id — Meshtastic apps render the
+    // message as a threaded reply to that packet.
     bool send(uint32_t portnum, const uint8_t *payload, size_t len,
               uint32_t to = BROADCAST_ADDR, uint8_t hopLimit = 3,
-              uint32_t requestId = 0);
+              uint32_t requestId = 0, uint32_t replyId = 0);
 
     // Bounded listen (the Class-A window; an always-awake app just calls it
     // in a loop). True when a packet on OUR channel, addressed to us or

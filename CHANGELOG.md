@@ -4,6 +4,13 @@ All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [SemVer](https://semver.org/).
 
+## [0.3.1] — 2026-07-17
+
+### Added
+- `send()` gains `replyId` — fills `Data.reply_id` so Meshtastic apps render
+  the message as a threaded reply to the packet it answers. Verified on air:
+  pong `reply_id` matches the ping's packet id.
+
 ## [0.3.0] — 2026-07-17
 
 ### Changed
