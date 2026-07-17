@@ -55,10 +55,18 @@ heartbeat.
 
 ### Budget
 
-> **Duty cycle (decided 2026-07-17): 1–4 wakes/day.** The node is asleep by
-> default — MCU System ON idle, radio off, only the PIR rail powered. RTC
-> wakes it 1–4×/day: heartbeat TX (device/env/detect-liveness metadata) →
-> ~10 s RX window → sleep. A PIR trip wakes it any time (alert + window).
+> **Duty cycle (2026-07-17): asleep by default, RTC heartbeat wake — rate
+> REMOTELY CONFIGURABLE via the command channel.** MCU System ON idle, radio
+> off, only the PIR rail powered; each wake = heartbeat TX → RX window →
+> sleep. A PIR trip wakes it any time (alert + window). Candidate rates:
+> 1–4/day ⇒ ~7–9 y; **hourly ⇒ ~3.8 y (10 s window) / ~4.8 y (5 s)** — all
+> comfortably multi-year on the AA cell.
+>
+> `set-interval` is the one command that can strand the device: firmware
+> must **clamp the accepted range** (e.g. 15 min–24 h) and **apply
+> provisionally, reverting if the next wake's handshake gets no
+> confirmation**. Interval + replay counter persist in a small internal
+> flash settings record (no filesystem).
 
 | Item | Cost (4 wakes/day) |
 |---|---:|
