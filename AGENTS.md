@@ -26,9 +26,10 @@ freshness. See `docs/rx-and-commands.md`.
 
 ## Status
 
-**Pre-spike.** Nothing is written yet. `docs/spec.md` is the design;
-`docs/spike.md` (task 2 — not yet written) will be the one-hour gate that must
-pass **before** any library code is written. Do not skip it.
+**Spike PASSED 2026-07-17.** `examples/SpikeSend/` is proven wire-compatible:
+a real Meshtastic node decodes its packets (0 hops, RSSI −51). See
+`docs/spike.md` §Results. `docs/spec.md` is the design; the library gets
+written by refactoring the working spike code.
 
 ## Why this exists
 
