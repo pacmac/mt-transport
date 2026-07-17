@@ -64,20 +64,28 @@ def run(psk: bytes, channel_name: str, frame: bytes) -> int:
     port = portnums_pb2.PortNum.Name(data.portnum)
     print(f"Data: portnum={port} payload={len(data.payload)}B")
 
-    if data.portnum != portnums_pb2.TELEMETRY_APP:
-        print("FAIL: expected TELEMETRY_APP")
+    if data.portnum == portnums_pb2.TELEMETRY_APP:
+        tel = telemetry_pb2.Telemetry()
+        tel.ParseFromString(data.payload)
+        variant = tel.WhichOneof("variant")
+        print(f"Telemetry: time={tel.time} variant={variant}")
+        if variant != "device_metrics":
+            print("FAIL: expected device_metrics")
+            return 1
+        dm = tel.device_metrics
+        print(f"  battery_level={dm.battery_level} voltage={dm.voltage:.2f}"
+              f" uptime_seconds={dm.uptime_seconds}")
+    elif data.portnum == portnums_pb2.NODEINFO_APP:
+        user = mesh_pb2.User()
+        user.ParseFromString(data.payload)
+        print(f"User: id={user.id!r} long_name={user.long_name!r}"
+              f" short_name={user.short_name!r} hw_model={user.hw_model}")
+        if not user.long_name:
+            print("FAIL: empty long_name")
+            return 1
+    else:
+        print("FAIL: expected TELEMETRY_APP or NODEINFO_APP")
         return 1
-
-    tel = telemetry_pb2.Telemetry()
-    tel.ParseFromString(data.payload)
-    variant = tel.WhichOneof("variant")
-    print(f"Telemetry: time={tel.time} variant={variant}")
-    if variant != "device_metrics":
-        print("FAIL: expected device_metrics")
-        return 1
-    dm = tel.device_metrics
-    print(f"  battery_level={dm.battery_level} voltage={dm.voltage:.2f}"
-          f" uptime_seconds={dm.uptime_seconds}")
 
     print("\nPASS — a Meshtastic receiver on this channel decodes this frame.")
     return 0

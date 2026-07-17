@@ -69,10 +69,11 @@ unfixed until 2026-07-08 ([#10890](https://github.com/meshtastic/firmware/issues
 low-power detection attempt is a stalled draft
 ([#8778](https://github.com/meshtastic/firmware/pull/8778), draft since Nov 2025).
 
-**Not a reason to build this: power.** Both a stripped Meshtastic (~4 mAh/day)
-and bare-metal (~2 mAh/day) land past a 19 Ah Li-SOCl2 cell's ~10-year
-self-discharge-limited life. Build it for **ownership and reliability**, not
-microamps. That argument does not survive contact with the battery's shelf life.
+**Power (revised 2026-07-17 — cell decided):** EEMB ER14505 AA Li-SOCl2,
+3.6 V, **2700 mAh**, primary, no recharging. At 2.7 Ah, ~4 mAh/day ⇒ ~1.9 y
+vs ~2 mAh/day ⇒ ~3.7 y — the consumption gap between routes **matters** (it
+did not under the earlier ~19 Ah assumption). Ownership and reliability remain
+the primary reasons; power is now a real secondary one.
 
 ## Scope
 

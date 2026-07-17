@@ -61,10 +61,15 @@ heartbeat.
 | TX (~0.5 s @ ~120 mA, 48/day) | ~0.8 mAh/day |
 | Boot (~0.2 s, bare-metal) | negligible |
 | **RX window (10 s @ ~12 mA, 48/day)** | **~1.6 mAh/day** |
-| **Total** | **~4 mAh/day ⇒ ~13 years on 19 Ah** |
+| **Total** | **~3–4 mAh/day** |
 
-Past the cell's ~1 %/yr self-discharge life. **RX windows are affordable.**
-Continuous RX is not (~290 mAh/day ⇒ ~2 months).
+> **Cell (decided 2026-07-17): EEMB ER14505 AA Li-SOCl2, 3.6 V, 2700 mAh,
+> primary — no recharging.** (Earlier drafts assumed ~19 Ah; those lifetimes
+> are void.) On 2.7 Ah the table above gives **~2 years**; halving the
+> heartbeat rate to 24/day gives ~3.7 y, hourly + 5 s windows ~5.5 y. RX
+> windows are still affordable, but they are now the **largest single line
+> item** — window length × heartbeat rate is the tuning knob that decides the
+> deployment's lifetime. Continuous RX (~290 mAh/day ⇒ ~9 days) remains fatal.
 
 ### The trade-off, stated plainly
 

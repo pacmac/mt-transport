@@ -210,11 +210,12 @@ lives in the *bootloader*, not the app (`BLEDfuSecure.cpp:124` merely sets
 `GPREGRET = 0xB1` and resets), so ~5 lines plus a wake window keeps node-dash
 OTA working.
 
-**Not a reason to do it:** power. Both routes land past the Li-SOCl2 cell's
-~10-year self-discharge-limited life (~4 mAh/day stripped-Meshtastic vs
-~2 mAh/day bare-metal on a 19 Ah cell). Do this for *ownership and
-reliability*, not microamps — that argument doesn't survive contact with the
-battery's shelf life.
+**Power (revised 2026-07-17):** the deployed cell is an **EEMB ER14505 AA
+Li-SOCl2, 3.6 V, 2700 mAh, primary — no recharging** (early drafts assumed
+~19 Ah; conclusions from that are void). At 2.7 Ah, ~4 mAh/day gives ~1.9 y
+and ~2 mAh/day gives ~3.7 y — so unlike at 19 Ah, **the ~2× consumption gap
+between routes now matters**, on top of the original ownership-and-reliability
+argument.
 
 **Latency** is a real secondary win: ~200 ms wake→TX vs ~3–5 s of Meshtastic
 boot. Only decisive if alert latency ever matters.

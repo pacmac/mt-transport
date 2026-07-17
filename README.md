@@ -14,12 +14,30 @@ mesh.receive(rxWindowMs, pkt);   // bounded Class-A style listen window
 No NodeDB. No router. No power state machine. No filesystem. No BLE stack.
 **No opinion about when your CPU sleeps** — that belongs to your application.
 
-## Status: pre-spike — nothing works yet
+## Status: TX works, proven on air (0.1.0). RX planned.
 
-No packet has been transmitted. `docs/spec.md` defines a hard gate (§THE
-SPIKE): a bare sketch must produce one packet that a stock Meshtastic node
-decodes into its NodeDB. Library code gets written only after that passes.
-Version 0.0.1 means what it says.
+The spike gate (`docs/spike.md`) **passed 2026-07-17**: a real Meshtastic
+node decodes this library's packets into its NodeDB — telemetry and NODEINFO
+both, at 0 hops, RSSI −51. Receive windows and a command channel
+(`docs/rx-and-commands.md`) are the next milestone; the API will move until
+then.
+
+```cpp
+#include <MeshtasticTransport.h>
+
+SX1262 radio = new Module(PIN_CS, PIN_DIO1, PIN_RESET, PIN_BUSY); // your board
+mt::MeshtasticTransport mesh;
+
+void setup() {
+    mt::MeshChannel ch = {"YourChannel", psk, sizeof(psk)};
+    // You bring the radio object and the entropy source — the packet id is
+    // the AES-CTR nonce, so begin() refuses a null RNG.
+    mesh.begin(radio, mt::EU868_LONG_FAST, ch, nodeNum, hwRand32);
+    mesh.send(meshtastic_PortNum_TELEMETRY_APP, buf, len); // pre-encoded protobuf
+}
+```
+
+See `examples/SpikeSend/` for the complete working sketch.
 
 ## Why
 

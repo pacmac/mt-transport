@@ -4,6 +4,27 @@ All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [SemVer](https://semver.org/).
 
+## [0.1.0] — 2026-07-17
+
+### Added
+- `MeshtasticTransport` library (`src/`): `begin`/`send`/`busy`/`sleep`.
+  App owns the radio object, entropy, message construction and sleep; the
+  library owns PHY config, the `Data` envelope, AES-CTR and the header.
+  Split as `mt_wire` (header/hash) and `mt_crypto` (nonce/CTR, AES128/256 by
+  key length, counter size 4).
+- NODEINFO_APP example: the node appears as "MT Spike"/"SPKE" — proves
+  `send()` is message-agnostic. Verified on air alongside telemetry
+  (0 hops, RSSI −51).
+- `tools/spike_oracle.py` decodes NODEINFO/User frames too.
+- Generated protobufs now ship with the library (`src/generated/`).
+- SpikeSend consumes the library via `lib_deps = symlink://../..` — the same
+  path real applications use.
+
+### Changed
+- Battery reality check in docs: EEMB ER14505 AA Li-SOCl2 3.6 V **2700 mAh**
+  primary (no recharging) replaces the earlier ~19 Ah assumption; lifetime
+  numbers recomputed (docs/rx-and-commands.md, docs/spec.md).
+
 ## [Unreleased]
 
 ### Added
