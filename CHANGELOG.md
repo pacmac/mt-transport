@@ -4,6 +4,16 @@ All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [SemVer](https://semver.org/).
 
+## [0.2.1] — 2026-07-17
+
+### Added
+- `resend()` — retransmit the last frame verbatim (same packet id, same
+  bytes; crypto-safe, mesh-deduped). Shores up one-shot replies on lossy
+  links: deployment #1 showed replies transmitted immediately after a
+  command die in the mesh's rebroadcast storm (~0% survival vs ~50% for
+  randomly-timed heartbeats). Listen-before-talk (CSMA) is the systemic
+  fix and is roadmapped separately.
+
 ## [0.2.0] — 2026-07-17
 
 ### Added

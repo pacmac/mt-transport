@@ -177,6 +177,14 @@ bool MeshtasticTransport::sendAck(uint32_t to, uint32_t requestId)
                 requestId);
 }
 
+bool MeshtasticTransport::resend()
+{
+    if (!_radio || _frameLen == 0)
+        return false;
+    _rxActive = false; // transmit takes the radio out of RX
+    return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
+}
+
 void MeshtasticTransport::sleep()
 {
     _rxActive = false;

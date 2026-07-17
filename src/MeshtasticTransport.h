@@ -83,6 +83,13 @@ public:
     // marks a phone's DM "delivered".
     bool sendAck(uint32_t to, uint32_t requestId);
 
+    // Retransmit the last transmitted frame verbatim — same packet id, same
+    // bytes. Crypto-safe (identical plaintext under the same keystream is a
+    // retransmission, not a nonce reuse) and mesh-friendly: receivers that
+    // caught the first copy dedupe this one, so exactly one message surfaces.
+    // Use to shore up one-shot replies on lossy links.
+    bool resend();
+
     bool busy() const { return false; } // transmit() is blocking; real once RX lands
     void sleep();                       // radio only — CPU sleep is yours
 
