@@ -69,12 +69,19 @@ def run(psk: bytes, channel_name: str, frame: bytes) -> int:
         tel.ParseFromString(data.payload)
         variant = tel.WhichOneof("variant")
         print(f"Telemetry: time={tel.time} variant={variant}")
-        if variant != "device_metrics":
-            print("FAIL: expected device_metrics")
+        if variant == "device_metrics":
+            dm = tel.device_metrics
+            print(f"  battery_level={dm.battery_level} voltage={dm.voltage:.2f}"
+                  f" uptime_seconds={dm.uptime_seconds}")
+        elif variant == "environment_metrics":
+            em = tel.environment_metrics
+            print(f"  temperature={em.temperature:.2f}"
+                  f" relative_humidity={em.relative_humidity:.1f}")
+        else:
+            print(f"FAIL: unhandled telemetry variant {variant}")
             return 1
-        dm = tel.device_metrics
-        print(f"  battery_level={dm.battery_level} voltage={dm.voltage:.2f}"
-              f" uptime_seconds={dm.uptime_seconds}")
+    elif data.portnum == portnums_pb2.DETECTION_SENSOR_APP:
+        print(f"Detection: {data.payload.decode(errors='replace')!r}")
     elif data.portnum == portnums_pb2.NODEINFO_APP:
         user = mesh_pb2.User()
         user.ParseFromString(data.payload)
