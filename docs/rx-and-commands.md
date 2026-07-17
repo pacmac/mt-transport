@@ -55,21 +55,33 @@ heartbeat.
 
 ### Budget
 
-| Item | Cost |
+> **Duty cycle (decided 2026-07-17): 1–4 wakes/day.** The node is asleep by
+> default — MCU System ON idle, radio off, only the PIR rail powered. RTC
+> wakes it 1–4×/day: heartbeat TX (device/env/detect-liveness metadata) →
+> ~10 s RX window → sleep. A PIR trip wakes it any time (alert + window).
+
+| Item | Cost (4 wakes/day) |
 |---|---:|
-| Sleep (System ON + RTC, PIR powered) | ~30 µA ⇒ ~0.7 mAh/day |
-| TX (~0.5 s @ ~120 mA, 48/day) | ~0.8 mAh/day |
+| Sleep (System ON + RTC, PIR powered, ~30 µA) | **~0.72 mAh/day** |
+| TX (~0.5 s @ ~120 mA, 4/day) | ~0.07 mAh/day |
+| RX window (10 s @ ~12 mA, 4/day) | ~0.13 mAh/day |
 | Boot (~0.2 s, bare-metal) | negligible |
-| **RX window (10 s @ ~12 mA, 48/day)** | **~1.6 mAh/day** |
-| **Total** | **~3–4 mAh/day** |
+| **Total** | **~0.9 mAh/day** |
 
 > **Cell (decided 2026-07-17): EEMB ER14505 AA Li-SOCl2, 3.6 V, 2700 mAh,
-> primary — no recharging.** (Earlier drafts assumed ~19 Ah; those lifetimes
-> are void.) On 2.7 Ah the table above gives **~2 years**; halving the
-> heartbeat rate to 24/day gives ~3.7 y, hourly + 5 s windows ~5.5 y. RX
-> windows are still affordable, but they are now the **largest single line
-> item** — window length × heartbeat rate is the tuning knob that decides the
-> deployment's lifetime. Continuous RX (~290 mAh/day ⇒ ~9 days) remains fatal.
+> primary — no recharging.** At 1–4 wakes/day the radio is a rounding error
+> and **sleep current is the entire budget**: ~0.8–0.9 mAh/day ⇒ **~7–9
+> years**, back to self-discharge-limited territory even on an AA cell.
+> Every µA shaved off sleep buys ~3 months of life; every extra daily wake
+> costs ~2 weeks. Continuous RX (~290 mAh/day ⇒ ~9 days) remains fatal.
+
+### Latency consequences of 1–4 wakes/day
+
+- **Remote command latency: up to 6–24 h** (one wake interval). Acceptable
+  for config/interrogation by design. On-site, a PIR trip opens a window
+  within seconds — walking up to the device restores near-instant access.
+- **Liveness detection is one wake interval**: the gateway must alarm on a
+  missed heartbeat (gateway feature, not firmware).
 
 ### The trade-off, stated plainly
 
