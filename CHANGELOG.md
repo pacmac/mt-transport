@@ -4,6 +4,15 @@ All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [SemVer](https://semver.org/).
 
+## [0.4.0] — 2026-07-17
+
+### Added
+- Airtime accounting: `airTxMs()`/`airRxMs()`/`airWindowMs()`/`resetAirWindow()`.
+  TX airtime is exact (RadioLib `getTimeOnAir` per transmit); RX airtime is
+  every decoded frame's time-on-air (channel occupancy). Lets an app fill
+  Meshtastic's `air_util_tx` (honest in any mode) and `channel_utilization`
+  (meaningful only while continuously listening).
+
 ## [0.3.1] — 2026-07-17
 
 ### Added

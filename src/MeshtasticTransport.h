@@ -102,6 +102,17 @@ public:
     // real-world contention data for the app to log.
     uint32_t csmaDeferrals() const { return _csmaDeferrals; }
 
+    // Airtime accounting since the last resetAirWindow(). TX airtime is exact
+    // (we own every transmit); RX airtime is every frame the radio decoded,
+    // whether or not it passed our filters (channel occupancy is RF-level).
+    // air_util_tx = airTxMs/airWindowMs is honest in any mode; channel util
+    // = (airTxMs+airRxMs)/airWindowMs is meaningful ONLY while continuously
+    // listening (a sleeping node hears almost nothing).
+    uint32_t airTxMs() const { return _txAirMs; }
+    uint32_t airRxMs() const { return _rxAirMs; }
+    uint32_t airWindowMs() const { return millis() - _airWindowStart; }
+    void resetAirWindow() { _txAirMs = 0; _rxAirMs = 0; _airWindowStart = millis(); }
+
     // Introspection for oracles/tests: the exact frame last transmitted.
     const uint8_t *lastFrame() const { return _frame; }
     size_t         lastFrameLen() const { return _frameLen; }
@@ -122,6 +133,7 @@ private:
     uint64_t _seen[8] = {0};      // (from<<32|id) dedupe ring
     uint8_t  _seenIdx = 0;
     uint32_t _csmaDeferrals = 0;
+    uint32_t _txAirMs = 0, _rxAirMs = 0, _airWindowStart = 0;
     bool isDuplicate(uint32_t from, uint32_t id);
     void waitForClearChannel();   // CSMA: CAD + backoff, fail-open ~2 s
 };

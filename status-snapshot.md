@@ -1,0 +1,199 @@
+- generic [ref=e2]:
+  - checkbox "close sidebar"
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e11]:
+        - button "PASV" [ref=e12] [cursor=pointer]
+        - button "ACTV" [ref=e13] [cursor=pointer]
+        - button "SCAN" [ref=e14] [cursor=pointer]
+      - generic [ref=e15]: mesh radar
+      - generic [ref=e17]:
+        - generic [ref=e18]: 328.0°
+        - generic [ref=e19]: 4 nodes
+        - 'generic "Signal headroom: +6.6 dB above decode limit" [ref=e146] [cursor=pointer]': RF +6.6dB
+        - generic [ref=e20]: live
+    - generic [ref=e22]:
+      - dialog:
+        - generic:
+          - generic:
+            - heading "Broadcast" [level=3]
+            - button "✕"
+          - generic:
+            - generic: To
+            - generic: All nodes (Broadcast)
+          - generic:
+            - generic: From
+            - generic:
+              - button "OMNI"
+              - button "YAGI"
+          - generic:
+            - generic: Ch
+            - combobox:
+              - option "0 — Primary" [selected]
+              - option "1"
+              - option "2"
+              - option "3"
+              - option "4"
+              - option "5"
+              - option "6"
+              - option "7"
+          - textbox "Type a message…"
+          - generic:
+            - button "Send" [disabled]
+        - generic:
+          - button "close"
+      - dialog:
+        - generic:
+          - button "close"
+      - generic [ref=e29]:
+        - generic [ref=e31]:
+          - generic [ref=e32]:
+            - heading "GRGE" [level=1] [ref=e33]
+            - generic [ref=e34]: "!987ab80f"
+            - generic [ref=e35]: MONITORED
+          - generic [ref=e36]:
+            - generic [ref=e37]: just now
+            - generic [ref=e38]: last heard
+            - generic [ref=e39]: via OMNI · -115dBm / -5.25
+        - generic [ref=e40]:
+          - generic [ref=e42]:
+            - generic [ref=e43]: Power
+            - generic [ref=e44]: 4.18V
+          - generic [ref=e46]:
+            - generic [ref=e47]: Environment
+            - generic [ref=e48]: 35.1 °C
+            - generic [ref=e49]: 25 %rh
+          - generic [ref=e51]:
+            - generic [ref=e52]: Uptime
+            - generic [ref=e53]: 1h 27m
+            - generic [ref=e54]: boot 2 · rst 0x0
+          - generic [ref=e56]:
+            - generic [ref=e57]: Triggers
+            - generic [ref=e58]: "0"
+            - generic [ref=e59]: fw trial-fw-v1
+        - generic [ref=e60]:
+          - generic [ref=e61]: Temperature / humidity
+          - generic [ref=e66]: Voltage
+          - generic [ref=e71]: Signal (RSSI / SNR)
+        - generic [ref=e77]:
+          - generic [ref=e78]: Heartbeat log
+          - table [ref=e79]:
+            - rowgroup [ref=e80]:
+              - row [ref=e81]:
+                - columnheader "Time" [ref=e82] [cursor=pointer]
+                - columnheader "Up" [ref=e83] [cursor=pointer]
+                - columnheader "Boot" [ref=e84] [cursor=pointer]
+                - columnheader "Rst" [ref=e85] [cursor=pointer]
+                - columnheader "Vbat" [ref=e86] [cursor=pointer]
+                - columnheader "Trig" [ref=e87] [cursor=pointer]
+            - rowgroup [ref=e88]:
+              - row [ref=e89]:
+                - cell "7/17/2026, 3:36:02 PM" [ref=e90]
+                - cell "1h 27m" [ref=e91]
+                - cell "2" [ref=e92]
+                - cell "0x0" [ref=e93]
+                - cell "4.18V" [ref=e94]
+                - cell "0" [ref=e95]
+              - row [ref=e96]:
+                - cell "7/17/2026, 11:26:04 AM" [ref=e97]
+                - cell "4m" [ref=e98]
+                - cell "1" [ref=e99]
+                - cell "0x0" [ref=e100]
+                - cell "4.19V" [ref=e101]
+                - cell "0" [ref=e102]
+              - row [ref=e103]:
+                - cell "7/17/2026, 11:24:26 AM" [ref=e104]
+                - cell "2m" [ref=e105]
+                - cell "1" [ref=e106]
+                - cell "0x0" [ref=e107]
+                - cell "4.19V" [ref=e108]
+                - cell "1" [ref=e109]
+              - row [ref=e110]:
+                - cell "7/17/2026, 11:04:32 AM" [ref=e111]
+                - cell "3m" [ref=e112]
+                - cell "3" [ref=e113]
+                - cell "0x0" [ref=e114]
+                - cell "4.09V" [ref=e115]
+                - cell "0" [ref=e116]
+              - row [ref=e117]:
+                - cell "7/17/2026, 11:01:36 AM" [ref=e118]
+                - cell "0m" [ref=e119]
+                - cell "3" [ref=e120]
+                - cell "0x0" [ref=e121]
+                - cell "4.23V" [ref=e122]
+                - cell "0" [ref=e123]
+              - row [ref=e124]:
+                - cell "7/17/2026, 10:59:37 AM" [ref=e125]
+                - cell "2m" [ref=e126]
+                - cell "1" [ref=e127]
+                - cell "0x0" [ref=e128]
+                - cell "4.23V" [ref=e129]
+                - cell "0" [ref=e130]
+              - row [ref=e131]:
+                - cell "7/17/2026, 10:58:10 AM" [ref=e132]
+                - cell "0m" [ref=e133]
+                - cell "1" [ref=e134]
+                - cell "0x0" [ref=e135]
+                - cell "4.26V" [ref=e136]
+                - cell "0" [ref=e137]
+        - generic [ref=e139]:
+          - generic [ref=e140]: Identity
+          - generic [ref=e141]:
+            - generic [ref=e142]: hw PRIVATE_HW
+            - generic [ref=e143]: role SENSOR
+            - generic [ref=e144]: 1 hops
+            - generic [ref=e145]: 51.03288, -3.15228
+  - generic:
+    - generic "close sidebar"
+    - complementary:
+      - generic:
+        - generic:
+          - generic: 📡
+          - generic:
+            - generic: mesh radar
+            - generic: fw 2.8.0.793a749
+        - generic: "!2687afb1"
+        - generic:
+          - combobox:
+            - option "OMNI" [selected]
+            - option "YAGI"
+      - list:
+        - listitem:
+          - generic: Overview
+        - listitem:
+          - generic: Radar
+        - listitem:
+          - generic: Nodes
+        - listitem:
+          - group:
+            - generic "Config"
+        - listitem:
+          - generic: Range Test
+        - listitem:
+          - generic:
+            - generic: Performance
+            - generic: +6.6dB
+        - listitem:
+          - generic: Messages
+        - listitem:
+          - generic:
+            - text: Devices
+            - generic: "2"
+        - listitem:
+          - generic: Garage
+      - generic:
+        - generic:
+          - generic: OMNI
+          - generic:
+            - generic:
+              - generic "BLE link 62%"
+            - generic: ready
+        - generic:
+          - generic: YAGI
+          - generic:
+            - generic:
+              - generic "BLE link 26%"
+            - generic: ready
+        - generic:
+          - generic: WS
+          - generic: live

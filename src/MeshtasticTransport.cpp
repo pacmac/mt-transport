@@ -82,6 +82,7 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     _frameLen = sizeof(h) + plainLen;
 
     waitForClearChannel();
+    _txAirMs += _radio->getTimeOnAir(_frameLen) / 1000;
     return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
 }
 
@@ -137,6 +138,8 @@ bool MeshtasticTransport::receive(uint32_t timeoutMs, RxPacket &out)
         size_t rawLen = _radio->getPacketLength();
         int st = _radio->readData(raw, rawLen > sizeof(raw) ? sizeof(raw) : rawLen);
         float rssi = _radio->getRSSI(), snr = _radio->getSNR();
+        if (st == RADIOLIB_ERR_NONE && rawLen > 0)
+            _rxAirMs += _radio->getTimeOnAir(rawLen) / 1000; // channel occupancy
         _radio->startReceive();
         if (st != RADIOLIB_ERR_NONE || rawLen <= sizeof(PacketHeader) ||
             rawLen > sizeof(raw))
@@ -201,6 +204,7 @@ bool MeshtasticTransport::resend()
     if (!_radio || _frameLen == 0)
         return false;
     waitForClearChannel(); // also clears _rxActive
+    _txAirMs += _radio->getTimeOnAir(_frameLen) / 1000;
     return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
 }
 
