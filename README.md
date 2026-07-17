@@ -14,13 +14,17 @@ mesh.receive(rxWindowMs, pkt);   // bounded Class-A style listen window
 No NodeDB. No router. No power state machine. No filesystem. No BLE stack.
 **No opinion about when your CPU sleeps** — that belongs to your application.
 
-## Status: TX works, proven on air (0.1.0). RX planned.
+## Status: TX + RX + command handshakes, proven on air (0.3.1)
 
-The spike gate (`docs/spike.md`) **passed 2026-07-17**: a real Meshtastic
-node decodes this library's packets into its NodeDB — telemetry and NODEINFO
-both, at 0 hops, RSSI −51. Receive windows and a command channel
-(`docs/rx-and-commands.md`) are the next milestone; the API will move until
-then.
+The spike gate (`docs/spike.md`) passed 2026-07-17; the same day the library
+grew `receive()` (filtered, decrypted, deduped), protocol ACKs, same-id
+`resend()` for one-shot messages on lossy links, CSMA listen-before-talk on
+every transmit (fail-open), and threaded replies (`Data.reply_id`). All of
+it verified over the air against real Meshtastic 2.7/2.8 nodes, and running
+in a live field deployment at 2.3 km. Known limitation: Meshtastic 2.8
+rejects PSK-encrypted direct messages ("legacy DM") — commanding rides on
+broadcasts within a private channel until X25519 PKI lands. The API will
+still move; SemVer is honest.
 
 ```cpp
 #include <MeshtasticTransport.h>
@@ -34,6 +38,10 @@ void setup() {
     // the AES-CTR nonce, so begin() refuses a null RNG.
     mesh.begin(radio, mt::EU868_LONG_FAST, ch, nodeNum, hwRand32);
     mesh.send(meshtastic_PortNum_TELEMETRY_APP, buf, len); // pre-encoded protobuf
+
+    mt::RxPacket rx;                 // bounded listen (Class-A ready);
+    if (mesh.receive(50, rx))        // loop it for continuous RX
+        handle(rx);                  // filtered, decrypted, deduped
 }
 ```
 

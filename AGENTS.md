@@ -26,10 +26,11 @@ freshness. See `docs/rx-and-commands.md`.
 
 ## Status
 
-**Spike PASSED 2026-07-17.** `examples/SpikeSend/` is proven wire-compatible:
-a real Meshtastic node decodes its packets (0 hops, RSSI −51). See
-`docs/spike.md` §Results. `docs/spec.md` is the design; the library gets
-written by refactoring the working spike code.
+**Library live at 0.3.1 (2026-07-17).** Spike passed and the library was
+extracted the same day: TX + RX + ACKs + resend + CSMA + threaded replies,
+all verified on air; consumed by a private firmware in live field trial.
+`docs/spike.md` §Results has the gate evidence; CHANGELOG.md is the truth of
+what shipped. 2.8 peers reject PSK DMs — commands are broadcasts until PKI.
 
 ## Why this exists
 

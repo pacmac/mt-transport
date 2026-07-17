@@ -1,5 +1,15 @@
 # RX and the command channel
 
+> **Status 2026-07-17:** the receive path (filter chain, decrypt, protobuf
+> decode, dedupe), @command handshakes with retry, CSMA-before-TX and
+> threaded replies are SHIPPED and verified on air (see CHANGELOG 0.2.0 →
+> 0.3.1). Still design, not code: bounded post-TX windows tied to sleep, the
+> gateway command queue, PKI (2.8 rejects PSK DMs — commands ride on
+> broadcasts within the private channel), and the persisted command counter.
+> Field finding: one-shot replies transmitted immediately after a command
+> nearly always died on a marginal link; fixed with randomized delay +
+> same-id resend + CSMA.
+
 ## Why RX is in scope
 
 A remote device that can only talk is a dead end: no config, no OTA trigger, no
