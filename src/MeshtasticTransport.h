@@ -96,6 +96,10 @@ public:
     uint32_t lastPacketId() const { return _lastId; }
     uint8_t  channelHash() const { return _hash; }
 
+    // Times a transmit was deferred because CAD heard LoRa activity —
+    // real-world contention data for the app to log.
+    uint32_t csmaDeferrals() const { return _csmaDeferrals; }
+
     // Introspection for oracles/tests: the exact frame last transmitted.
     const uint8_t *lastFrame() const { return _frame; }
     size_t         lastFrameLen() const { return _frameLen; }
@@ -115,7 +119,9 @@ private:
     bool _rxActive = false;       // radio currently in RX (survives short polls)
     uint64_t _seen[8] = {0};      // (from<<32|id) dedupe ring
     uint8_t  _seenIdx = 0;
+    uint32_t _csmaDeferrals = 0;
     bool isDuplicate(uint32_t from, uint32_t id);
+    void waitForClearChannel();   // CSMA: CAD + backoff, fail-open ~2 s
 };
 
 } // namespace mt

@@ -80,7 +80,25 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     memcpy(_frame, &h, sizeof(h));
     _frameLen = sizeof(h) + plainLen;
 
+    waitForClearChannel();
     return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
+}
+
+void MeshtasticTransport::waitForClearChannel()
+{
+    // Listen-before-talk: transmitting blind is how deployment #1 lost
+    // nearly every reply. CAD before TX; escalating random backoff while the
+    // channel is busy; FAIL-OPEN after ~2 s — an alarm that politely never
+    // speaks is worse than a collision.
+    _rxActive = false; // CAD ends in standby
+    for (int attempt = 0; attempt < 8; attempt++) {
+        if (_radio->scanChannel() == RADIOLIB_CHANNEL_FREE)
+            return;
+        _csmaDeferrals++;
+        uint32_t window = 60u << (attempt < 3 ? attempt : 3);
+        delay(30 + (_rng ? _rng() : 0) % window);
+    }
+    // 8 busy scans: transmit anyway.
 }
 
 bool MeshtasticTransport::isDuplicate(uint32_t from, uint32_t id)
@@ -181,7 +199,7 @@ bool MeshtasticTransport::resend()
 {
     if (!_radio || _frameLen == 0)
         return false;
-    _rxActive = false; // transmit takes the radio out of RX
+    waitForClearChannel(); // also clears _rxActive
     return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
 }
 

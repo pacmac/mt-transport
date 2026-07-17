@@ -4,6 +4,16 @@ All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [SemVer](https://semver.org/).
 
+## [0.3.0] — 2026-07-17
+
+### Changed
+- **Every transmit now does listen-before-talk**: SX126x CAD before TX with
+  escalating random backoff (8 attempts, ~2 s cap), then FAIL-OPEN — an
+  alarm that politely never speaks is worse than a collision. Applies to
+  send() and resend(). `csmaDeferrals()` exposes the contention count.
+  Motivated by deployment #1: blind one-shot replies transmitted into the
+  mesh rebroadcast window nearly always died.
+
 ## [0.2.1] — 2026-07-17
 
 ### Added
