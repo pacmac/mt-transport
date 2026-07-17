@@ -39,6 +39,18 @@ struct RegionParams {
 // channel name, sits on 869.525 MHz (docs/wire-format.md §1).
 extern const RegionParams EU868_LONG_FAST;
 
+// A received, decrypted, decoded packet from our channel.
+struct RxPacket {
+    uint32_t from, to, id;
+    uint32_t portnum;
+    uint32_t requestId; // Data.request_id — ACKs reference the packet they answer
+    uint8_t  hopLimit;
+    bool     wantAck;
+    float    rssi, snr;
+    uint8_t  payload[237];
+    size_t   payloadLen;
+};
+
 class MeshtasticTransport {
 public:
     // Applies the PHY configuration sequence the reference firmware uses
@@ -53,9 +65,23 @@ public:
     // protobuf bytes (an encoded Telemetry, User, or raw bytes for e.g.
     // DETECTION_SENSOR_APP); this wraps them in Data{portnum, payload} —
     // the Data envelope is transport, what goes inside it is yours.
+    // requestId (0 = absent) fills Data.request_id — set it when this packet
+    // answers another (ACKs, command responses).
     // Returns false on encode, size or radio error.
     bool send(uint32_t portnum, const uint8_t *payload, size_t len,
-              uint32_t to = BROADCAST_ADDR, uint8_t hopLimit = 3);
+              uint32_t to = BROADCAST_ADDR, uint8_t hopLimit = 3,
+              uint32_t requestId = 0);
+
+    // Bounded listen (the Class-A window; an always-awake app just calls it
+    // in a loop). True when a packet on OUR channel, addressed to us or
+    // broadcast, decrypts, decodes and is not a recent duplicate. Frames
+    // failing any filter are dropped and the wait continues to the deadline.
+    bool receive(uint32_t timeoutMs, RxPacket &out);
+
+    // Protocol ACK: Routing{error_reason=NONE} on ROUTING_APP with
+    // request_id=id. Stops the sender's ReliableRouter retransmissions and
+    // marks a phone's DM "delivered".
+    bool sendAck(uint32_t to, uint32_t requestId);
 
     bool busy() const { return false; } // transmit() is blocking; real once RX lands
     void sleep();                       // radio only — CPU sleep is yours
@@ -78,6 +104,11 @@ private:
     static const size_t MAX_PAYLOAD = 237; // MAX_LORA_PAYLOAD_LEN+1-16 (RadioInterface.h:66)
     uint8_t _frame[sizeof(PacketHeader) + MAX_PAYLOAD];
     size_t  _frameLen = 0;
+
+    bool _rxActive = false;       // radio currently in RX (survives short polls)
+    uint64_t _seen[8] = {0};      // (from<<32|id) dedupe ring
+    uint8_t  _seenIdx = 0;
+    bool isDuplicate(uint32_t from, uint32_t id);
 };
 
 } // namespace mt

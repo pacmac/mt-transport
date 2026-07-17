@@ -4,6 +4,22 @@ All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [SemVer](https://semver.org/).
 
+## [0.2.0] — 2026-07-17
+
+### Added
+- `receive(timeoutMs, RxPacket&)` — bounded listen (Class-A window; loop it
+  for continuous RX). Filter chain: channel hash → own-echo drop → addressed
+  to us or broadcast → AES-CTR decrypt → Data decode → (from,id) dedupe ring.
+- `sendAck(to, requestId)` — Routing ACK; `send()` gains `requestId` for
+  response packets. Proven on air: broadcast "ping" answered with
+  "pong up=33s rssi=-45 snr=7.2", request_id echoing the ping's packet id.
+
+### Known limitation
+- Direct text messages cannot reach us: Meshtastic 2.8 rejects PSK DMs
+  ("legacy DM", Router.cpp:544) and requires PKI (X25519), which this
+  library does not implement yet. Commands ride on broadcasts within the
+  private channel — same trust model (the PSK is the authentication).
+
 ## [0.1.0] — 2026-07-17
 
 ### Added
