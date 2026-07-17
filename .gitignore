@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+
+# Real channel keys never enter this repo — copy secrets.h.example instead.
+**/secrets.h

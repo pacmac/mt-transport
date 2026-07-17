@@ -1,0 +1,19 @@
+mt-transport
+Copyright (C) 2026 Peter
+
+Licensed under the GNU General Public License v3.0 or later (see LICENSE).
+
+This library implements the over-the-air packet format of the Meshtastic
+project (https://meshtastic.org, https://github.com/meshtastic/firmware),
+which is licensed under GPL-3.0. The format was documented by reading the
+Meshtastic firmware source; docs/wire-format.md cites the relevant
+file:line locations. mt-transport shares no code with Meshtastic firmware —
+it is an independent implementation of the wire format — but is licensed
+GPL-3.0 in acknowledgement of that lineage.
+
+Protobuf message definitions are consumed from the Meshtastic protobufs
+repository (https://github.com/meshtastic/protobufs), used under its
+GPL-3.0 license.
+
+Meshtastic is a registered trademark of Meshtastic LLC. This project is not
+affiliated with or endorsed by Meshtastic LLC.
