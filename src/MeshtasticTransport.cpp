@@ -81,9 +81,7 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     memcpy(_frame, &h, sizeof(h));
     _frameLen = sizeof(h) + plainLen;
 
-    waitForClearChannel();
-    _txAirMs += _radio->getTimeOnAir(_frameLen) / 1000;
-    return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
+    return transmitFrame();
 }
 
 void MeshtasticTransport::waitForClearChannel()
@@ -101,6 +99,21 @@ void MeshtasticTransport::waitForClearChannel()
         delay(30 + (_rng ? _rng() : 0) % window);
     }
     // 8 busy scans: transmit anyway.
+}
+
+// The single choke point for every transmission. send() and resend() both
+// route through here, so CSMA, airtime accounting and the transmit itself can
+// never drift apart (F6) — and there is exactly one place that knows whether a
+// frame actually reached the antenna.
+//
+// Airtime is computed BEFORE transmit() and must stay that way:
+// getTimeOnAir() opens with a getPacketType() SPI read, which is valid in
+// standby (where CAD leaves the chip) but returns garbage in sleep.
+bool MeshtasticTransport::transmitFrame()
+{
+    waitForClearChannel();                              // also clears _rxActive
+    _txAirMs += _radio->getTimeOnAir(_frameLen) / 1000;
+    return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
 }
 
 bool MeshtasticTransport::isDuplicate(uint32_t from, uint32_t id)
@@ -203,9 +216,7 @@ bool MeshtasticTransport::resend()
 {
     if (!_radio || _frameLen == 0)
         return false;
-    waitForClearChannel(); // also clears _rxActive
-    _txAirMs += _radio->getTimeOnAir(_frameLen) / 1000;
-    return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
+    return transmitFrame();
 }
 
 void MeshtasticTransport::sleep()

@@ -136,6 +136,7 @@ private:
     uint32_t _txAirMs = 0, _rxAirMs = 0, _airWindowStart = 0;
     bool isDuplicate(uint32_t from, uint32_t id);
     void waitForClearChannel();   // CSMA: CAD + backoff, fail-open ~2 s
+    bool transmitFrame();         // the ONE transmit path: CSMA + airtime + transmit
 };
 
 } // namespace mt
