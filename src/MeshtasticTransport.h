@@ -109,6 +109,13 @@ public:
     // real-world contention data for the app to log.
     uint32_t csmaDeferrals() const { return _csmaDeferrals; }
 
+    // Consecutive RADIO-LEVEL transmit failures; cleared by the first success.
+    // Encode/size/crypto rejections return before the transmit path is reached,
+    // so they can never inflate this. A sustained streak means hardware, not
+    // contention: CSMA fails open, so a busy channel still reaches transmit()
+    // and a healthy radio still returns ERR_NONE and clears the count.
+    uint32_t txFailStreak() const { return _txFailStreak; }
+
     // Airtime accounting since the last resetAirWindow(). TX airtime is exact
     // (we own every transmit); RX airtime is every frame the radio decoded,
     // whether or not it passed our filters (channel occupancy is RF-level).
@@ -140,6 +147,7 @@ private:
     uint64_t _seen[8] = {0};      // (from<<32|id) dedupe ring
     uint8_t  _seenIdx = 0;
     uint32_t _csmaDeferrals = 0;
+    uint32_t _txFailStreak = 0;
     uint32_t _txAirMs = 0, _rxAirMs = 0, _airWindowStart = 0;
     bool isDuplicate(uint32_t from, uint32_t id);
     void waitForClearChannel();   // CSMA: CAD + backoff, fail-open ~2 s

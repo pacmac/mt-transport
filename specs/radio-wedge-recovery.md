@@ -1,9 +1,9 @@
 ---
 task: radio-wedge-recovery
 status: active
-source_hash:  # step 1 (sleep/wake API) implemented; steps 2-5 outstanding
-  src/MeshtasticTransport.cpp: bd006025cd19d7158e6994a6811b2f60c1dc2dbf7801d8b9b9698eb9dbc4289c
-  src/MeshtasticTransport.h: 6d020180687333c7f08fd78a9add0f649d306ba5e9b4004f0d4853e9a0488225
+source_hash:  # steps 1-2 (sleep/wake API + txFailStreak) implemented; steps 3-5 outstanding
+  src/MeshtasticTransport.cpp: 8ad08d9fafc0253c6262a323a03b7b86fb50bec250fd1d897ee669f282123a35
+  src/MeshtasticTransport.h: 86a43bc2cfbfca4dd846d1423fed6bf9b1400e05843994169f3994c021d8d7cf
 # Baseline moved: this spec was written against MeshtasticTransport.cpp @ 0.4.0
 # (fdbc359c…). Commit 7b1048a (airtime-accounting-fixes step 1) then added the
 # transmitFrame() choke point, making the file 3018154f… before step 1 of THIS
@@ -359,6 +359,108 @@ should not pretend otherwise.
 3. **DEFERRED — on-air proof.** The `@wedge` test that demonstrates self-reset
    is step 5 and needs steps 2-4 first. Step 1 changes no runtime behaviour, so
    there is nothing on-air to observe yet. Recorded rather than skipped.
+
+## Step 2 — implementation (exact diffs)
+
+**Scope: the streak counter only.** The firmware call site and the WDT gate are
+steps 3-4.
+
+### Why placement alone enforces W4 — no error-kind plumbing needed
+
+`send()` returns false at three points **before** `transmitFrame()` is reached:
+`:45-46` (null radio / oversized payload), `:59-60` (`pb_encode` failed),
+`:70-71` (`ctrCrypt` failed). `resend()` likewise guards `!_radio ||
+_frameLen == 0` at `:216-217` before its call.
+
+**So `transmitFrame()` is only ever entered with a valid, encoded, encrypted
+frame, and any false it returns is by construction a radio-level failure.**
+That is precisely the distinction W4 says the library knows and discards.
+Counting inside `transmitFrame()` therefore satisfies "radio-level only"
+structurally — an encode or size rejection can never touch the streak because
+it never gets there.
+
+### src/MeshtasticTransport.h — accessor + member
+
+Next to `csmaDeferrals()` (`:103`):
+
+```diff
+     uint32_t csmaDeferrals() const { return _csmaDeferrals; }
++
++    // Consecutive RADIO-LEVEL transmit failures; cleared by the first success.
++    // Encode/size/crypto rejections never reach the transmit path, so they can
++    // never inflate this (W4). A sustained streak means hardware, not
++    // contention: CSMA fails open, so a busy channel still reaches transmit()
++    // and a healthy radio still returns ERR_NONE and clears the count.
++    uint32_t txFailStreak() const { return _txFailStreak; }
+```
+
+With the counters (`:135`):
+
+```diff
+     uint32_t _csmaDeferrals = 0;
++    uint32_t _txFailStreak = 0;
+```
+
+### src/MeshtasticTransport.cpp — count inside the choke point
+
+```diff
+ bool MeshtasticTransport::transmitFrame()
+ {
+     waitForClearChannel();                              // also clears _rxActive
+     _txAirMs += _radio->getTimeOnAir(_frameLen) / 1000;
+-    return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
++    if (_radio->transmit(_frame, _frameLen) != RADIOLIB_ERR_NONE) {
++        _txFailStreak++;
++        return false;
++    }
++    _txFailStreak = 0;
++    return true;
+ }
+```
+
+The `_txAirMs +=` line is deliberately left where it is. Moving accounting
+behind the success check is **airtime-accounting-fixes step 4**, a different
+task; doing it here would blur two tasks in one diff.
+
+### RESIDUAL RISK — the load-bearing unknown for this whole task
+
+Steps 1-4 all assume a wedged SX1262 **reports** failure: that `standby()` or
+`transmit()` returns something other than `RADIOLIB_ERR_NONE`. If a wedged part
+instead answers cleanly while radiating nothing, then `wake()` returns true,
+`transmit()` returns `ERR_NONE`, the streak never increments, the gate never
+fires, and the node stays mute exactly as it did on 2026-07-18.
+
+Neither step 1 nor step 2 detects that case, and step 5's `@wedge` test does
+NOT close it — `@wedge` proves the *recovery path* works when a failure is
+reported, not that a real wedge is reportable.
+
+If the field failure recurs with `txFailStreak() == 0` in telemetry, that is
+the answer: the fault is invisible at the RadioLib API and the next line of
+defence must be external (e.g. a wall-clock "no successful TX in N heartbeats"
+deadline, deliberately rejected here for good reasons that would need
+revisiting, or periodic radio re-init). Record the streak in `broadcastDebug()`
+so this is falsifiable in the field rather than guessed at.
+
+### Files in step 2
+
+| file | change |
+|---|---|
+| `src/MeshtasticTransport.h` | `txFailStreak()` accessor; `_txFailStreak` member |
+| `src/MeshtasticTransport.cpp` | branch on transmit result inside `transmitFrame()` |
+| `specs/radio-wedge-recovery.md` | this section |
+
+**NOT changing:** `library.json`/`CHANGELOG.md` (0.5.0 ships with the task);
+`pac-garage-alarm` (steps 3-4); the `_txAirMs` placement (529 step 4).
+
+### Step 2 verification plan
+
+1. **Static:** `_txFailStreak++` appears exactly once, inside `transmitFrame()`;
+   `_txFailStreak = 0` exactly once, on the success path.
+2. **Build:** both consumers compile unchanged (additive API).
+3. **DEFERRED — forced-failure test.** Proving the streak increments only on
+   radio errors needs a stub radio that can return `TX_TIMEOUT`; `test/` is
+   empty and the library has no native env. Real proof arrives at step 5 via
+   `@wedge` on hardware.
 
 ## Files
 

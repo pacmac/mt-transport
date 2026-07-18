@@ -113,7 +113,17 @@ bool MeshtasticTransport::transmitFrame()
 {
     waitForClearChannel();                              // also clears _rxActive
     _txAirMs += _radio->getTimeOnAir(_frameLen) / 1000;
-    return _radio->transmit(_frame, _frameLen) == RADIOLIB_ERR_NONE;
+    // Only radio-level outcomes reach here: send() rejects encode/size/crypto
+    // failures before this point, so the streak can never be inflated by a bad
+    // payload. A sustained streak therefore means hardware, not contention —
+    // CSMA fails open, so a busy channel still reaches transmit() and a healthy
+    // radio still clears the count.
+    if (_radio->transmit(_frame, _frameLen) != RADIOLIB_ERR_NONE) {
+        _txFailStreak++;
+        return false;
+    }
+    _txFailStreak = 0;
+    return true;
 }
 
 bool MeshtasticTransport::isDuplicate(uint32_t from, uint32_t id)
