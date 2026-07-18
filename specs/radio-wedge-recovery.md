@@ -761,6 +761,48 @@ delay) *before* the force, so its successes cannot reset the counter either.
 | `pac-garage-alarm/src/main.cpp` | `@wedge` verb; `help` list |
 | `specs/radio-wedge-recovery.md` | this section |
 
+### STEP 5 RESULT — PASSED on hardware, 2026-07-18
+
+```
+boot=1 rst=2 txfs=0 csma=7          (HOME, port-260 debug frame)
+```
+
+**`rst=2` = DOG.** The watchdog fired. `@wedge` forced the streak, `wdtFeed()`'s
+guard stopped feeding, and the node reset itself. The recovery path is proven
+end to end on real hardware: a node that stops transmitting no longer stays
+mute until someone drives to it.
+
+#### Two findings that only emerged by testing
+
+**1. `rst` had NEVER worked.** `g_resetReason` read `NRF_POWER->RESETREAS`,
+but the Arduino core's `init()` runs before `setup()` and clears that register
+(`wiring.c:37-40`). Every `rst=` ever shipped was 0 — "clean power-on"
+regardless of what happened. Fixed to `readResetReason()`
+(firmware-hardening step 8, abed66c). `rst=2` above is the first true reset
+reason this project has ever recorded.
+
+**2. BOOT COUNT DOES NOT SURVIVE A WATCHDOG RESET on this platform.**
+Measured:
+
+| reset type | `boot` |
+|---|---|
+| soft reset (`@reboot` -> `NVIC_SystemReset`) | 1 -> 2 — GPREGRET2 **survives** |
+| **watchdog reset** | back to **1** — GPREGRET2 **cleared** |
+
+This contradicts Nordic documenting GPREGRET as retained across WDT reset, but
+it is what the hardware does here (bootloader is the likely culprit).
+
+**Consequence: boot count CANNOT be used to detect a watchdog loop** — exactly
+the thing we most want to see in the field. It also invalidates an inference
+made earlier in this investigation: `boot=1` after a wedge was read as "no
+reset occurred", when it actually meant "a watchdog reset happened and wiped
+the counter". The opposite conclusion. DEV1's post-recovery `boot=1` is
+consistent with the same effect.
+
+**This makes the flash-backed boot-history ring buffer necessary, not
+optional.** A retained 8-bit register that is cleared by the one reset type we
+care about cannot carry this diagnostic.
+
 ### Step 5 verification plan
 
 1. **Static:** `@wedge` rejects `*`; force happens after `sendReplyWithRetry`.
