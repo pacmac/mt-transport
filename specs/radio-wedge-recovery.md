@@ -657,6 +657,122 @@ the code separately is fine; deploying it separately is not.
    demonstrates self-reset within ~35 s with `DOG` on the next boot. Until then
    this step is verified structurally, not observed.
 
+## Step 5 — implementation (exact diffs)
+
+### The spec's proposed @wedge mechanism DOES NOT WORK — corrected
+
+Verification §3 says: *"add a `@wedge` debug command that sleeps the radio and
+deliberately skips the wake."* Reading `SX126x::transmit()` shows why that
+cannot work:
+
+```c
+int16_t SX126x::transmit(const uint8_t* data, size_t len, uint8_t addr) {
+  int16_t state = standby();      // <-- exits sleep, warm start, config retained
+  RADIOLIB_ASSERT(state);
+```
+
+**Every transmit calls `standby()` first.** Sleeping the radio and skipping the
+wake is therefore self-healing: the next `send()` wakes the chip and transmits
+normally, `txFailStreak()` stays 0, the gate never lifts, and the test proves
+nothing.
+
+Note the wider implication for the incident: a failed or skipped wake alone
+should NOT permanently mute a node, because transmit re-standbys regardless.
+That points further at the radio having been in a state `standby()` could not
+clear — consistent with only a power cycle recovering it.
+
+### Chosen mechanism: force the streak (option B)
+
+`@wedge` sets `txFailStreak` to `TX_FAIL_LIMIT` directly and lets the existing
+gate act. Deterministic, no undefined radio states, and it tests exactly what
+step 4 built.
+
+Rejected alternatives:
+- **Cold sleep** (`sleep(false)`, config lost): closer to a real fault, but the
+  resulting `transmit()` return code is undefined. Testing undefined behaviour
+  and calling it a pass is worse than testing less and saying so.
+- **De-init / re-`begin()` mid-flight**: unpredictable, risks leaving the node
+  genuinely dead.
+
+**WHAT THIS TEST DOES AND DOES NOT PROVE — read before trusting it.**
+It proves: *given a detected failure run*, the node stops feeding the watchdog,
+resets within `WDT_SECONDS`, and reports `DOG`. That is the recovery path, end
+to end, on real hardware.
+It does NOT prove a real SX1262 wedge is *detectable*. That is the residual
+risk from step 2 and this step does not close it. If the field failure recurs
+with `txfs == 0` in telemetry, the guard cannot see it and an external defence
+is required.
+
+### mt-transport — debug hook
+
+```diff
+     uint32_t txFailStreak() const { return _txFailStreak; }
++
++    // DEBUG/TEST ONLY. Forces the streak so a node can prove its own watchdog
++    // gate without a genuinely broken radio. Never called in normal operation;
++    // any successful transmit clears it again.
++    void forceTxFailStreak(uint32_t n) { _txFailStreak = n; }
+```
+
+### pac-garage-alarm — the @wedge verb
+
+ORDERING IS LOad-BEARING: `sendReplyWithRetry()` transmits, and a successful
+transmit sets `_txFailStreak = 0`. Forcing the streak *before* replying would
+wipe the condition being created. `@wedge` therefore follows the `sleepfor`
+reply-first pattern — reply fully, then force, then `return`.
+
+```c
+} else if (!strncasecmp(cmd, "wedge", 5)) {
+    if (all) {   // must never fan out — this deliberately mutes a node
+        snprintf(reply, sizeof(reply),
+                 "{\"type\":\"err\",\"msg\":\"wedge needs an exact target, not *\"}");
+    } else {
+        // Reply FIRST and let both copies go out: sendReplyWithRetry()
+        // transmits, and a successful transmit CLEARS the streak. Forcing
+        // before replying would erase the very condition we are creating.
+        char r[128];
+        snprintf(r, sizeof(r),
+                 "{\"type\":\"wedge\",\"streak\":%lu,\"expect\":\"reset<=%lus rst=DOG\"}",
+                 (unsigned long)TX_FAIL_LIMIT, (unsigned long)WDT_SECONDS);
+        sendReplyWithRetry(r, rx.id);
+        Serial.printf("WEDGE: txFailStreak=%lu forced; expect WDT reset <=%lus\n",
+                      (unsigned long)TX_FAIL_LIMIT, (unsigned long)WDT_SECONDS);
+        mesh.forceTxFailStreak(TX_FAIL_LIMIT);
+        return; // reply sent; wdtFeed() is now gated shut
+    }
+}
+```
+
+Add `wedge` to the `help` verb list.
+
+**Safety:** `@*` is rejected, so it can never fan out to the deployed unit. The
+target must be an exact 4-hex suffix or shortName.
+
+**Why nothing clears the streak before the WDT fires:** HOME's `@interval` is
+300 s and `WDT_SECONDS` is 30, so no heartbeat transmit occurs inside the
+window. `sendReplyWithRetry()` completes (both copies, ~5-8 s of blocking
+delay) *before* the force, so its successes cannot reset the counter either.
+
+### Files in step 5
+
+| file | change |
+|---|---|
+| `src/MeshtasticTransport.h` | `forceTxFailStreak()` debug hook |
+| `pac-garage-alarm/src/main.cpp` | `@wedge` verb; `help` list |
+| `specs/radio-wedge-recovery.md` | this section |
+
+### Step 5 verification plan
+
+1. **Static:** `@wedge` rejects `*`; force happens after `sendReplyWithRetry`.
+2. **Build:** both repos.
+3. **ON AIR, HOME ONLY** — the first real proof in this programme:
+   `@<suffix> wedge` -> `{"type":"wedge",...}` received -> node goes quiet ->
+   within ~30 s it reboots -> next debug frame shows `boot` incremented and
+   `rst` = `0x2` (DOG).
+4. **Regression:** `@sleepfor 15` still sleeps and wakes normally; heartbeats
+   resume after the reset.
+5. **DEV1 is NOT touched.**
+
 ## Files
 
 | file | change |

@@ -116,6 +116,11 @@ public:
     // and a healthy radio still returns ERR_NONE and clears the count.
     uint32_t txFailStreak() const { return _txFailStreak; }
 
+    // DEBUG/TEST ONLY. Forces the streak so a node can prove its own watchdog
+    // gate without a genuinely broken radio. Never called in normal operation;
+    // any successful transmit clears it again.
+    void forceTxFailStreak(uint32_t n) { _txFailStreak = n; }
+
     // Airtime accounting since the last resetAirWindow(). TX airtime is exact
     // (we own every transmit); RX airtime is every frame the radio decoded,
     // whether or not it passed our filters (channel occupancy is RF-level).
