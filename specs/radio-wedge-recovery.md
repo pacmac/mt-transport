@@ -1,9 +1,10 @@
 ---
 task: radio-wedge-recovery
 status: active
-source_hash:  # steps 1-2 (sleep/wake API + txFailStreak) implemented; steps 3-5 outstanding
+source_hash:  # steps 1-3 implemented; steps 4-5 outstanding
   src/MeshtasticTransport.cpp: 8ad08d9fafc0253c6262a323a03b7b86fb50bec250fd1d897ee669f282123a35
   src/MeshtasticTransport.h: 86a43bc2cfbfca4dd846d1423fed6bf9b1400e05843994169f3994c021d8d7cf
+  ../pac-garage-alarm/src/main.cpp: 2fbd567ebac65cb6981fdfbc486c4b16a939fcfa42b1e247e1cbdb07bbd08a76
 # Baseline moved: this spec was written against MeshtasticTransport.cpp @ 0.4.0
 # (fdbc359c…). Commit 7b1048a (airtime-accounting-fixes step 1) then added the
 # transmitFrame() choke point, making the file 3018154f… before step 1 of THIS
@@ -461,6 +462,200 @@ so this is falsifiable in the field rather than guessed at.
    radio errors needs a stub radio that can return `TX_TIMEOUT`; `test/` is
    empty and the library has no native env. Real proof arrives at step 5 via
    `@wedge` on hardware.
+
+## Step 3 — implementation (exact diffs)
+
+**Scope: the wake call site only.** The WDT gate is step 4.
+
+### Correction to this spec's own Design section
+
+The Design says:
+
+> `main.cpp:1016` — `radio.standby()` → `if (!mesh.wake()) { /* leave streak
+> to trip the WDT gate */ }`
+
+**"Leave the streak to trip the gate" is true but arbitrarily slow, and the
+spec should not imply otherwise.** `txFailStreak()` only increments when a
+transmit is *attempted and fails*. If `wake()` fails, `doSleep()` returns and
+`sleepCycle()` proceeds to `mesh.receive()` — a receive, not a transmit. The
+next transmit is the following heartbeat, up to `heartbeatMs` away: **300 s on
+DEV1, configurable to 24 h**. Six consecutive failures are then needed before
+the gate fires. On DEV1's beat that is roughly **30 minutes** of silence before
+recovery starts.
+
+Resolution (chosen 2026-07-18): **retry `wake()` once, then continue.** A
+transient standby failure recovers immediately at the cost of one SPI
+round-trip; a persistent one still falls through to the streak/gate path with
+the latency above, now documented rather than hidden.
+
+Rejected: treating a single failed wake as an immediate fault (stop feeding the
+WDT at once). It would reset within 30 s, but it inverts this task's own
+principle — a *streak* was chosen over a single failure precisely so one bad
+reading cannot reboot a healthy node.
+
+### pac-garage-alarm/src/main.cpp — `doSleep()` `:1006` and `:1016`
+
+```diff
+ static void doSleep(uint32_t ms)
+ {
+-    mesh.sleep();
++    if (!mesh.sleep())
++        report("SLEEP  ", false); // radio refused to sleep; carry on and let
++                                  // the wake path below sort it out
+     uint32_t end = millis() + ms;
+     uint32_t pirAt = pirTriggers;
+     while ((int32_t)(end - millis()) > 0) {
+         wdtFeed();
+         uint32_t remain = end - millis();
+         delay(remain > 1000 ? 1000 : remain); // tickless System-ON sleep
+         if (pirTriggers != pirAt)
+             break; // PIR woke us early
+     }
+-    radio.standby(); // SX1262 warm-start before the next TX
++    // Wake through the library, and CHECK it. A bare radio.standby() here
++    // discarded its int16_t status, so a failed wake went unnoticed and every
++    // later send() failed silently forever — the 2026-07-18 failure mode.
++    //
++    // One retry: a transient standby error recovers immediately for one SPI
++    // round-trip. A persistent one falls through to txFailStreak()/the WDT
++    // gate (step 4) — but note that path only starts counting at the NEXT
++    // transmit, i.e. up to heartbeatMs away (300 s on DEV1), then needs
++    // TX_FAIL_LIMIT failures. Recovery is guaranteed, not prompt.
++    if (!mesh.wake()) {
++        report("WAKE   ", false);
++        if (!mesh.wake())
++            report("WAKE2  ", false); // radio is not answering; step 4 gates the WDT
++    }
+ }
+```
+
+`report()` already exists (`:266`) and logs to serial — which is silent on
+battery until firmware-hardening step 5 adds the `Serial1` mirror. Noted, not
+a blocker: the value here is that the failure is *recorded in code* rather than
+discarded, and step 4 acts on it regardless of whether anyone is listening.
+
+### Files in step 3
+
+| file | change |
+|---|---|
+| `pac-garage-alarm/src/main.cpp` | checked `mesh.sleep()`; `radio.standby()` → checked `mesh.wake()` with one retry |
+| `specs/radio-wedge-recovery.md` | this section |
+
+**NOT changing:** `wdtFeed()` gating (step 4); the `@wedge` command (step 5);
+anything in mt-transport (steps 1-2 landed).
+
+### Step 3 verification plan
+
+1. **Static:** `grep -c "radio\." src/main.cpp` == 0 — no bare RadioLib calls
+   remain behind the library's back. `mesh.wake()` appears exactly twice (call
+   + retry).
+2. **Build:** `pac-garage-alarm` compiles against mt-transport with the new
+   bool API.
+3. **Functional:** `@sleepfor 15` on HOME must still sleep and wake normally —
+   the happy path is unchanged, only the error path gains checking.
+4. **DEFERRED — failed-wake proof.** Forcing `standby()` to fail needs the
+   `@wedge` command, which is step 5.
+
+## Step 4 — implementation (exact diffs)
+
+**This is the step that changes field behaviour.** Everything before it was
+plumbing; this one lets the device reboot itself.
+
+### The watchdog is hammered from FOUR sites, not three
+
+W1 above lists `:1078`, `:1010`, `:1050`. It **misses a fourth**: the feed at
+the top of `sleepCycle()`. Current line numbers after step 3:
+
+| site | context |
+|---|---|
+| `:1012` | `doSleep()` chunk loop |
+| **`:1044`** | **top of `sleepCycle()` — MISSING from W1** |
+| `:1065` | RX window |
+| `:1093` | top of `loop()` |
+
+This matters more than a typo. Had the gate been applied per call site as the
+Design implies, `:1044` would have stayed unconditional — and `sleepCycle()`
+runs every beat, so that single unconditional feed would keep the watchdog
+hammered forever and **the entire task would be inert**.
+
+### Therefore: gate inside wdtFeed(), not at the call sites
+
+```diff
+-static void wdtFeed() { NRF_WDT->RR[0] = WDT_RR_RR_Reload; }
++// The watchdog guard. We never trigger a reset — we stop SUPPRESSING the one
++// that was always available. Feeding unconditionally from four sites is what
++// made "alive but mute" survivable indefinitely (W1).
++//
++// Gated here rather than at each call site deliberately: there are four sites
++// and W1 itself missed one. Gating the function means every present AND future
++// caller is covered and the guard cannot be defeated by a forgotten site.
++static void wdtFeed()
++{
++    if (mesh.txFailStreak() >= TX_FAIL_LIMIT)
++        return; // radio has failed TX_FAIL_LIMIT times running: let the 30 s
++                // WDT reset us. RESETREAS=DOG on the next boot says why.
++    NRF_WDT->RR[0] = WDT_RR_RR_Reload;
++}
+```
+
+New constant beside `WDT_SECONDS`:
+
+```diff
+ static const uint32_t WDT_SECONDS            = 30;
++// Consecutive radio-level TX failures before we stop feeding the watchdog.
++// CSMA fails open, so a busy channel still reaches transmit() and a healthy
++// radio still clears the streak — a run this long means hardware, not
++// contention. No sends are attempted while asleep, so deliberate deafness
++// (@sleepfor, long @interval) can never accumulate a streak.
++static const uint32_t TX_FAIL_LIMIT          = 6;
+```
+
+Declaration order verified: `mesh` is at `:68`, `wdtFeed()` at `:230`. No
+`wdtFeed()` runs before `mesh.begin()` (`wdtStart()` is at `:995`, `begin()` at
+`:975`), and `_txFailStreak` is member-initialised to 0 regardless, so the gate
+is open until a real failure run occurs.
+
+### DECISION (2026-07-18): a permanently dead radio boot-loops. Accepted.
+
+`_txFailStreak` is a transport member, so it resets to 0 on every boot. A
+permanently dead radio therefore cycles: 6 failures -> reset -> boot -> 6
+failures -> reset, roughly every 30 s + heartbeat, indefinitely. Over days that
+drains the battery instead of sitting quietly mute.
+
+**Accepted deliberately.** A node that keeps trying beats a silent brick, and
+the loop is visible — `RESETREAS=DOG` plus a climbing boot count. The
+alternative (cap the resets, then stay up mute so the unit still answers
+commands and preserves battery) requires **persistent** reset counting across
+power loss, which is exactly what the boot-history ring-buffer task builds.
+
+**Revisit when boot-history lands.** Until then the honest failure mode is
+preferred over a half-implemented cap.
+
+### PREREQUISITE — this step is inert without firmware-hardening §1
+
+If the radio is dead, the post-reset `mesh.begin()` may also fail, and today
+that hits the un-watchdogged `while(true)` blink at `:978` — the node bricks
+anyway and this entire step delivers nothing. **firmware-hardening step 1
+(mesh.begin failure must reset, not spin) must ship in the same flash.** Landing
+the code separately is fine; deploying it separately is not.
+
+### Files in step 4
+
+| file | change |
+|---|---|
+| `pac-garage-alarm/src/main.cpp` | `TX_FAIL_LIMIT` constant; gate inside `wdtFeed()` |
+| `specs/radio-wedge-recovery.md` | this section |
+
+### Step 4 verification plan
+
+1. **Static:** `wdtFeed()` contains the gate; all four call sites unchanged and
+   therefore all gated; `TX_FAIL_LIMIT` defined once.
+2. **Build:** firmware compiles.
+3. **Regression by construction:** no `send()` occurs during `@sleepfor` or
+   between heartbeats, so the streak cannot grow while deliberately deaf.
+4. **DEFERRED — the real proof is step 5.** `@wedge` forces the failure and
+   demonstrates self-reset within ~35 s with `DOG` on the next boot. Until then
+   this step is verified structurally, not observed.
 
 ## Files
 
