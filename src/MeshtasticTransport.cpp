@@ -219,11 +219,31 @@ bool MeshtasticTransport::resend()
     return transmitFrame();
 }
 
-void MeshtasticTransport::sleep()
+bool MeshtasticTransport::sleep()
+{
+    _rxActive = false;      // set BEFORE the radio call: a failure must never
+    if (!_radio)            // leave the flag claiming RX is still armed
+        return false;       // "no radio" is not "slept successfully"
+    return _radio->sleep() == RADIOLIB_ERR_NONE;
+}
+
+// Counterpart to sleep(). RadioLib's no-arg sleep() is warm start with config
+// retained (SX126x_commands.cpp:47), so standby() alone brings the radio back —
+// no begin() re-init needed.
+//
+// Offering sleep() with no wake() is what pushed the firmware into calling
+// radio.standby() directly and dropping its int16_t status. The missing API
+// caused the discarded error, so the fix is the API, not a comment.
+//
+// NOTE: true means the SX1262 acknowledged the standby command. It does NOT
+// prove the radio will transmit — a wedged part may answer and stay mute.
+// txFailStreak() is the detector for that; this is the silent-failure half.
+bool MeshtasticTransport::wake()
 {
     _rxActive = false;
-    if (_radio)
-        _radio->sleep();
+    if (!_radio)
+        return false;
+    return _radio->standby() == RADIOLIB_ERR_NONE;
 }
 
 } // namespace mt

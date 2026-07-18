@@ -93,7 +93,14 @@ public:
     bool resend();
 
     bool busy() const { return false; } // transmit() is blocking; real once RX lands
-    void sleep();                       // radio only — CPU sleep is yours
+
+    // Radio only — CPU sleep is yours. Both return whether the radio
+    // acknowledged; a caller that ignores the result is back to a silently
+    // dead radio. wake() is the supported counterpart to sleep(): reaching
+    // past this API to radio.standby() is how the wake error came to be
+    // discarded in the first place.
+    bool sleep();
+    bool wake();
 
     uint32_t lastPacketId() const { return _lastId; }
     uint8_t  channelHash() const { return _hash; }
