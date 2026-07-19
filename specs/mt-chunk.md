@@ -192,6 +192,23 @@ Peter has several units. Relevant characteristics:
   the ESP32 is genuinely off, not sleeping. Independently powered from its own
   270 mAh cell, so it does not load the alarm's battery budget.
 
+**Observed 2026-07-19 on Peter's unit (connected via an FT232 on `/dev/ttyUSB0`):**
+
+It is currently running **ESPHome**, on WiFi at −50 dBm, battery 3.55 V, and
+capturing frames at `len=7075`. Peter confirms custom firmware is available when
+needed — which it will be: ESPHome is declarative and WiFi/Home-Assistant
+oriented, and at the garage there is no WiFi. What the chunker needs is a
+byte-range server over UART:
+
+| command | returns |
+|---|---|
+| `CAPTURE` | take a frame → `len`, `crc32` |
+| `INFO` | current frame's `len`, `crc32` |
+| `READ <off> <n>` | `n` bytes from `off` |
+
+That is `IPayloadSource` on the wire. Note the CRC must come **from the camera**,
+because the RAK never holds the whole payload — see the 28 KB finding above.
+
 **Open questions, to verify against the schematic rather than assume:**
 
 1. **External wake.** The documented wake sources are the RTC alarm and the
@@ -276,10 +293,20 @@ arithmetic working out exactly as the batch cap predicts.
 
 **Caveats stated rather than buried:**
 
-- The JPEG fixtures are synthetic test cards and compress better than
-  photographs. A real OV3660 frame at these dimensions will be nearer 10–15 KB,
-  so **expect roughly double the chunk count**. The fixture generator's airtime
-  figures are therefore optimistic.
+- ~~The JPEG fixtures are synthetic test cards and compress better than
+  photographs. A real OV3660 frame will be nearer 10–15 KB, so expect roughly
+  double the chunk count.~~ **CORRECTED 2026-07-19 by measurement.** Peter's
+  Timer Camera X was connected mid-session, running ESPHome, and its log reads:
+
+  ```
+  [D][esp32_camera:172]: Got Image: len=7075
+  ```
+
+  **7,075 bytes** against the 320×320 fixture's 6,927 — within 2%. The estimate
+  above was wrong and pessimistic by ~2×; the synthetic fixtures are
+  representative after all, and the airtime figures stand. **31 chunks, ~37 s of
+  airtime for a real frame.** Recorded rather than quietly edited, because the
+  guess was stated with more confidence than it had earned.
 - `maxframe=237` sits exactly at the ceiling by design (230 + 7). The harness
   asserts no frame ever exceeds it.
 - Two bugs were found and fixed by writing the harness, before any hardware
