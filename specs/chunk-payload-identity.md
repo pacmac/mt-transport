@@ -1,6 +1,7 @@
 ---
 task: chunk-payload-identity
-status: proposed — awaiting approval, no edits made
+status: implemented and verified on hardware 2026-07-19 — see §9 for what was
+        NOT verified (the live-camera path failed, for an unrelated reason)
 source_hash: ~  # set once implementation lands
 updated: 2026-07-19
 scope:
@@ -173,6 +174,69 @@ Ports (verified 2026-07-19, and the handoff records only the first):
 `/dev/ttyACM1` = `239a:8029` RAK upload, renumbers on flash — resolve by USB id.
 `/dev/ttyACM0` = `1a86:55d4` RAK debug UART, **stable across reflash**.
 `/dev/ttyUSB0` = `0403:6001` M5 FT232 — plugging it resets the ESP32.
+
+---
+
+## 9. RESULTS — verified on DEV1 2026-07-19
+
+Flashed DEV1 `!8cee336b`, branch `chunk-integration`. All traffic via OMNI
+`!2687afb1` on channel 2. Note `/status` lists **two** BLE devices —
+`!2687afb1` (OMNI) and `!fa39f7b4` (Heltec); only the former is the gateway,
+and `/nodes` does not list OMNI at all.
+
+**The defect is fixed.** Both refusal forms confirmed on air:
+
+```
+@336b chunk info        -> {"type":"chunk","pid":1,"len":7156,"crc":"65FBD5D9"}
+@336b chunk info 1      -> same manifest                      (validated, matching)
+@336b chunk info 4242   -> {"type":"err","msg":"refused","pid":4242,"held":1}
+@336b chunk info 1      -> {"type":"err","msg":"refused","pid":1,"held":2}
+```
+
+The last line is the §9 scenario exactly: pid 2 held, pid 1 evicted, pid 1
+requested. Pre-fix that returned pid 2's manifest reported as a success.
+
+**These replies are self-authenticating** — they echo the *requested* pid, so a
+stale frame answering the wrong command cannot masquerade as a pass. That
+mattered (see below).
+
+**Regression: PASSED, but via the embedded image, not the camera.**
+`pid 1` — 7,156 B, `crc32 65fbd5d9` matching, JPEG SOI+EOI present, 237.0 s at
+30.2 B/s, batch 4. The embedded image lives in program flash, so it isolates
+this change from camera state; that is what makes it a valid regression test of
+*this* change, but it is **not** the camera fetch §7.4 asks for.
+
+### A false pass that was almost reported
+
+The first eviction script used the client's default matcher
+(`typeof r === 'object'`), which accepts *any* object. Late replies satisfied
+the *next* command and every result shifted by one: `cam snap` returned the
+previous `chunk info` reply, and the script then scored `{"type":"cam"}` as
+"refused" purely because it was not `type=chunk` — printing **PASS**. It was
+neither a manifest nor a refusal.
+
+That is this task's own defect class — treating "not the wrong answer" as "the
+right answer" — committed by the verification harness. Fixed by correlating
+every reply to its command and scoring uncorrelated replies as inconclusive
+rather than as either outcome. See memory `verify-by-side-effect`.
+
+### The live-camera failure is NOT this change
+
+`pid 2` fetch failed CRC. Device-side log gives the cause outright:
+
+```
+cam: len=4834 crc=7EA161EA chunks=22 in 400ms   <- manifest, earlier good capture
+cam: capture failed status=2                    <- ST_NOFRAME: no frame held
+```
+
+`status=2` is `ST_NOFRAME` — the documented consequence of the FT232 asserting
+DTR and wiping the held frame. So `publishSource` advertises a manifest from an
+earlier capture while the camera holds nothing. The *same* chunk and LoRa code
+carried the embedded image byte-perfect minutes later, which is what rules this
+change out as the cause. **Not diagnosed further — needs its own cycle.**
+
+Also found, out of scope: `lib/commands.js` has **no `cam` verb** at all, so the
+client cannot express `cam snap|info|read` that the device supports.
 
 ---
 
