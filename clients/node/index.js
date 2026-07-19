@@ -135,7 +135,7 @@ class Client {
       } else if (frame[0] === chunk.MSG.PULL) {
         // noReply: the device answers with chunks on port 261, not text.
         await this.queue.enqueue(
-          cmd.chunkPull(t, frame.readUInt16BE(3), frame[5]),
+          cmd.chunkPull(t, frame.readUInt16BE(1), frame.readUInt16BE(3), frame[5]),
           { priority: -1, noReply: true,
             dedupKey: `pull:${frame.readUInt16BE(3)}` });
       }
