@@ -1,7 +1,7 @@
 ---
 task: chunk-payload-identity
-status: implemented and verified on hardware 2026-07-19 — see §9 for what was
-        NOT verified (the live-camera path failed, for an unrelated reason)
+status: implemented and fully verified on hardware 2026-07-19 — embedded AND
+        live-camera paths both CRC-verified over LoRa; see §9
 source_hash: ~  # set once implementation lands
 updated: 2026-07-19
 scope:
@@ -220,7 +220,23 @@ right answer" — committed by the verification harness. Fixed by correlating
 every reply to its command and scoring uncorrelated replies as inconclusive
 rather than as either outcome. See memory `verify-by-side-effect`.
 
-### The live-camera failure is NOT this change
+### Camera path re-verified after a power reset — CLOSED
+
+The failure below was camera state, and resetting the ESP32 proved it. The
+FT232's DTR line drives EN, so the camera can be reset in software with no
+cable touched — the documented hazard used deliberately. Clean boot
+(`POWERON_RESET`, `psram=4194304`, I2C slave `0x62` up), then:
+
+```
+@336b cam snap -> {"type":"cam","pid":2,"len":4921,"crc":"1A9B4854","ok":true}
+fetch pid 2    -> 4921 bytes, crc32 1a9b4854, JPEG SOI+EOI, 199.0 s @ 24.7 B/s
+```
+
+Bytes and CRC agree with the **camera's own** computation, so this verifies the
+whole chain — camera → I2C → RAK → LoRa → Node — not just internal
+self-consistency. §7.4 is therefore satisfied for real, not by proxy.
+
+### The earlier live-camera failure was NOT this change
 
 `pid 2` fetch failed CRC. Device-side log gives the cause outright:
 
