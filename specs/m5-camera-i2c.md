@@ -1,6 +1,6 @@
 ---
 task: chunk-on-device
-status: investigating
+status: investigated — root cause found, fix not yet chosen
 source_hash: ~  # no implementation proposed yet — this is a Phase 1 document
 updated: 2026-07-19
 scope: mylibs/mt-chunk/src/M5CameraSource.h, projects/timercam-chunk/src/main.cpp
@@ -119,6 +119,58 @@ Answer from **source and datasheet**, not from behaviour at the master.
 
 ---
 
+## 5b. ANSWERS — from source, 2026-07-19
+
+`esp32-hal-i2c-slave.c`. Two mutually exclusive dispatch paths selected by
+target, and **the Timer Camera X is a classic ESP32** (`board = m5stack-timer-cam`).
+
+**Non-ESP32 targets** (S3/C3/…), line 813, `#ifndef CONFIG_IDF_TARGET_ESP32`:
+
+```c
+if (cause == I2C_STRETCH_CAUSE_MASTER_READ) {
+    event.event = I2C_SLAVE_EVT_TX;   // queued when the read BEGINS
+    i2c_slave_send_event(...);        // clock stays stretched
+}
+```
+…and `i2c_slave_task` (line 921) clears the stretch **after** `request_callback`
+returns. The master is held while `onRequest` runs.
+
+**Classic ESP32**, line 797, inside the `I2C_TRANS_COMPLETE` (STOP) branch:
+
+```c
+if (slave_rw) {  // READ
+#if CONFIG_IDF_TARGET_ESP32
+    if (i2c->dev->status_reg.scl_main_state_last == 6) {
+        event.event = I2C_SLAVE_EVT_TX;   // queued when the read has ENDED
+```
+
+**The stretch block is not compiled for classic ESP32.**
+
+### ROOT CAUSE
+
+**`onRequest` fires AFTER the read completes.** Its `Wire.write()` →
+`i2cSlaveWrite()` (line 464) loads the hardware TX FIFO for the **NEXT** read.
+The slave is therefore **structurally one read behind**, and a request-response
+protocol whose reply depends on a command sent in the same exchange is
+**impossible on this part**.
+
+Not a timing bug — an architectural mismatch. That is why all seven timing
+fixes failed: none of them *could* have worked.
+
+| Q | answer |
+|---|---|
+| 1. When is TX latched? | After the transaction, into the FIFO, for the next read |
+| 2. Ordering of the callbacks? | Both drain one FreeRTOS queue in `i2c_slave_task`, order preserved — but `EVT_TX` is enqueued at STOP |
+| 3. Repeated START? | Does not help; the TX event still only fires at STOP on this target |
+| 4. TX FIFO length? | `SOC_I2C_FIFO_LEN` = 32 on ESP32, plus a `tx_queue` spill. 32-byte pieces fit exactly |
+| 5. Is request-response appropriate? | **No.** A register/auto-increment model is what this API actually supports |
+
+**Corollary:** `CMD_INFO` appears to work only because `refresh()` polls
+repeatedly and the value is stable across polls. It is lagged too. Any fix must
+make that explicit rather than keep relying on the accident.
+
+---
+
 ## 6. Alternatives to weigh once §5 is answered
 
 Listed so the fix is chosen, not stumbled into:
@@ -126,9 +178,21 @@ Listed so the fix is chosen, not stumbled into:
 - **Repeated START** — bind write+read into one transaction (Q3).
 - **Register-file model** — camera maintains a memory-mapped window; master
   writes an address then reads, no staging callback involved.
-- **Abandon I2C for UART.** Rejected earlier on pin cost (`Serial1` is the debug
-  mirror), but a UART stream has none of these semantics. The cost was 2 pins
-  and a second UARTE; the cost of I2C so far has been a whole session.
+- ~~**Abandon I2C for UART.**~~ **STRUCK 2026-07-19.** Peter: *"as soon as you
+  use the UART you will lose debugging."* Correct, and I had mispriced this as
+  merely a pin cost.
+
+  `Serial1` **is** the debug mirror, added today in `firmware-hardening` step 5
+  precisely because USB CDC needs VBUS and is silent on a battery unit. It is
+  the only diagnostic that survives in the field. Its absence is what made the
+  2026-07-18 investigation cost a full day, and the measurement that finally
+  explained THIS bug — logging I2C from the camera's own side — arrived over a
+  UART.
+
+  Trading the field unit's only diagnostic channel to solve a bench problem is
+  the wrong direction. A second UARTE1 exists on the nRF52840 in principle, but
+  needs two free WisBlock pins (unverified) and is moot if the cursor-stream
+  approach works.
 - **Camera-push instead of RAK-pull over I2C** — the camera streams the frame on
   request and the RAK buffers one chunk. Inverts who drives, sidesteps the
   slave-response problem entirely.
