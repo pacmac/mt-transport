@@ -142,7 +142,73 @@ See memory `no-patching-over-patches`.
 
 ---
 
-## 7. Next step is INVESTIGATION, not code
+## 7. HANDOFF — operational state a new session needs
+
+Written 2026-07-19 at a clean seam: the camera I2C fix is committed and
+verified, the next defect is scoped and untouched. Full version is step 8 of the
+`chunk-on-device` mcpp task.
+
+### Hardware, and the one hard rule
+
+| | |
+|---|---|
+| **DEV1 / DEPL** `!8cee336b`, suffix `336b` | **on the bench, yours to use.** Branch `chunk-integration`. Camera wired over I2C: Grove SCL G13→P0.14, SDA G4→P0.13, GND common; camera 5V deliberately **not** connected |
+| **Field unit** `!987ab80f`, short name `HOME` | **NEVER flash, sleep or test against it.** 2.5 km away; recovery is a 90-minute round trip |
+
+**It is named `HOME` but it is AT THE GARAGE** — identity follows the board, not
+the site. Do not let the name mislead you.
+
+**Channel 2 (`Private`) only. Never channel 0 (PRIMARY)** — no exceptions. 0 is
+the API default everywhere, so an *unset* channel is the dangerous case.
+
+### Gotchas that each cost real time
+
+- The RAK's USB CDC **renumbers on every flash**. Never hardcode it;
+  `scratchpad/rakport.sh` resolves it by USB id `239a:8029`.
+- Plugging the camera's FT232 in **asserts DTR and resets the ESP32**, wiping the
+  held frame. A `cam snap` returning `st=2` right after you touched a cable is
+  that, not a bug.
+- The gateway WebSocket needs **`maxPayload: 0`** — it opens with a ~3 MB
+  snapshot that trips ws's 1 MB default and closes with 1009.
+- `192.168.10.205:8000` fronts **both** the send route and the event stream.
+- mesh-gw can only send text/admin/traceroute. **It is live — do not modify it.**
+
+### Tooling is EPHEMERAL
+
+Helper scripts live in the session scratchpad (`/tmp/claude-0/…`) and **will be
+lost**. Worth preserving into the repo: `rakport.sh` (tty resolution),
+`fetchdiff.js` (keeps the buffer on CRC failure — this is what pinpointed the
+corruption), `peak_antenna.py`, `swap_monitor.py`.
+
+*Note on `swap_monitor.py`:* its silence threshold must exceed the node's
+heartbeat or it invents power-cycle events. It did exactly that at 150 s against
+a 300 s heartbeat, and I nearly reported the fiction as fact.
+
+### What is NOT true yet
+
+1. **The next defect** (`specs/m5-camera-i2c-fix.md` §9): requesting pid 1
+   returns pid 2 **and reports success**. Needs its own `/idiot`.
+2. **Alarm preemption is unmeasured.** The whole justification for pull over
+   push is that an alarm never queues behind a transfer. That is *argued*, never
+   tested. Fire a PIR trigger mid-transfer and measure. If latency degrades, the
+   architecture premise is wrong. (`mt-chunk` step 8.)
+3. Heartbeat advert and monotonic pid are **not implemented**; the Node client's
+   parsers for them are stubs *because of that*.
+4. The device holds **one payload at a time**. `publishSource` evicts the
+   embedded image; a reboot restores it.
+
+### Leftovers, verified present
+
+- `timercam-chunk/src/main.cpp` still carries the I2C RX/TX debug logging. It
+  was kept "until the fix is proven" — it is proven now, so remove it.
+- `M5CameraSource.h:41-45` has a **stale comment** describing the old, wrong
+  diagnosis. The real cause is `specs/m5-camera-i2c.md` §5b.
+- The camera's `CHUNK_DATA_MAX` (224) no longer governs staging;
+  `I2C_DATA_PER_PIECE` (28) does. Harmless but confusing.
+
+---
+
+## 8. Next step is INVESTIGATION, not code
 
 `specs/m5-camera-i2c.md` owns the I2C transport problem. No further edits to
 `M5CameraSource.h` or the camera firmware until that investigation reports.

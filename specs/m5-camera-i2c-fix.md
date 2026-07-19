@@ -257,3 +257,24 @@ stream; nothing guards payload identity.
 
 Out of scope here (§6 excludes `pac-garage-alarm` and `MtChunk.*`). It gets its
 own `/idiot` cycle — it is a distinct defect needing its own verification.
+
+---
+
+## 10. Follow-ups left open (verified present 2026-07-19)
+
+Not defects, but loose ends this change created or left:
+
+1. **Remove the camera's I2C debug logging.** §6 said keep it "until the fix is
+   proven". It is proven — the live transfer verified by CRC. It costs a
+   `Serial.printf` per transaction in `loop()`.
+2. **`M5CameraSource.h:41-45` is a stale comment** describing the pre-root-cause
+   theory ("10 ms was NOT enough for the first read after an INFO…"). That was
+   the wrong diagnosis; the real one is `specs/m5-camera-i2c.md` §5b. Leaving it
+   invites the next reader to re-derive the wrong model.
+3. **`CMD_SETTLE_MS` is still 25 ms and may now be far too generous.** The FIFO
+   is loaded synchronously in `onReceive`, so the settle only covers the task
+   dispatch. Reducing it would speed every chunk — but it is a **measured**
+   change, not a guess, and belongs in its own cycle.
+4. **The camera's `CHUNK_DATA_MAX` (224) no longer governs staging** —
+   `I2C_DATA_PER_PIECE` (28) does, and `g_out` is sized 224 for a 32-byte
+   payload. Harmless; confusing.
