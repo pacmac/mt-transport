@@ -95,8 +95,20 @@ void MeshtasticTransport::waitForClearChannel()
         if (_radio->scanChannel() == RADIOLIB_CHANNEL_FREE)
             return;
         _csmaDeferrals++;
+        // CAD said BUSY, which means a preamble was detected — a packet is
+        // arriving right now. LISTEN to it rather than sitting deaf in standby
+        // for the whole backoff. The reference firmware does exactly this
+        // (RadioLibInterface.cpp:462: startReceive() before rescheduling).
+        //
+        // Partial fix, honestly: we can hear the frame but cannot deliver it,
+        // because this is blocking and several frames deep inside send(). A
+        // frame that lands here is counted by _rxDroppedByTx below rather than
+        // vanishing silently. Draining it properly needs the async restructure.
+        if (_radio->startReceive() == RADIOLIB_ERR_NONE)
+            _rxActive = true;
         uint32_t window = 60u << (attempt < 3 ? attempt : 3);
         delay(30 + (_rng ? _rng() : 0) % window);
+        _rxActive = false; // the next scanChannel() returns the chip to standby
     }
     // 8 busy scans: transmit anyway.
 }
@@ -118,11 +130,23 @@ bool MeshtasticTransport::transmitFrame()
     // payload. A sustained streak therefore means hardware, not contention —
     // CSMA fails open, so a busy channel still reaches transmit() and a healthy
     // radio still clears the count.
+    // A frame may have arrived while we were backing off. Transmitting now
+    // destroys it, and we cannot deliver it — this path is blocking, several
+    // frames deep inside send(), with nowhere to hand a packet back to. So
+    // COUNT the loss rather than hide it: silent loss is exactly what made the
+    // 2026-07-18 investigation so expensive.
+    if (_radio->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE)
+        _rxDroppedByTx++;
     if (_radio->transmit(_frame, _frameLen) != RADIOLIB_ERR_NONE) {
         _txFailStreak++;
         return false;
     }
     _txFailStreak = 0;
+    // Re-arm RX immediately. Otherwise the chip sits in STDBY_RC — deaf — until
+    // the application happens to call receive() again, which from the library's
+    // point of view is an unbounded window.
+    if (_radio->startReceive() == RADIOLIB_ERR_NONE)
+        _rxActive = true;
     return true;
 }
 

@@ -121,6 +121,13 @@ public:
     // any successful transmit clears it again.
     void forceTxFailStreak(uint32_t n) { _txFailStreak = n; }
 
+    // Frames that arrived but were destroyed by a transmit before we could read
+    // them. Non-zero means real inbound traffic is being lost to our own TX
+    // path. Also diagnostic: if this climbs while csmaDeferrals climbs, the CAD
+    // detections were real traffic; if it stays zero while deferrals climb, CAD
+    // is detecting preambles that never become frames.
+    uint32_t rxDroppedByTx() const { return _rxDroppedByTx; }
+
     // Airtime accounting since the last resetAirWindow(). TX airtime is exact
     // (we own every transmit); RX airtime is every frame the radio decoded,
     // whether or not it passed our filters (channel occupancy is RF-level).
@@ -153,6 +160,7 @@ private:
     uint8_t  _seenIdx = 0;
     uint32_t _csmaDeferrals = 0;
     uint32_t _txFailStreak = 0;
+    uint32_t _rxDroppedByTx = 0;
     uint32_t _txAirMs = 0, _rxAirMs = 0, _airWindowStart = 0;
     bool isDuplicate(uint32_t from, uint32_t id);
     void waitForClearChannel();   // CSMA: CAD + backoff, fail-open ~2 s
