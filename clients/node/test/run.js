@@ -4,7 +4,7 @@
 // parses real C++ encoder output.
 
 const assert = require('assert');
-const { cmd, target, parse260, parseAdverts, CommandQueue, chunk } = require('../index');
+const { cmd, target, parse260, parseAdverts, CommandQueue, chunk, PayloadStore } = require('../index');
 
 let pass = 0;
 let skipped = 0;
@@ -107,6 +107,41 @@ t('crc32 matches the value agreed by device, camera and python', () => {
     return;
   }
   assert.strictEqual(chunk.crc32(fs.readFileSync(p)) >>> 0, 0x65FBD5D9);
+});
+
+t('store round-trips a partial and rejects a corrupt one', () => {
+  const os = require('os'), fs = require('fs'), path = require('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mtstore-'));
+  const s = new PayloadStore({ dir });
+  const buf = Buffer.alloc(100, 7);
+  s.savePartial('!node1', { pid: 42, crc: 0xABCD1234, count: 5, len: 100,
+                            have: new Set([0, 2, 4]), buf });
+  const p = s.loadPartial('!node1', 42);
+  assert.strictEqual(p.pid, 42);
+  assert.strictEqual(p.crc, 0xABCD1234 >>> 0);
+  assert.strictEqual(p.count, 5);
+  assert.deepStrictEqual([...p.have].sort((a, b) => a - b), [0, 2, 4]);
+  assert.strictEqual(p.buf.length, 100);
+  // A buffer whose length disagrees with the sidecar len must be refused, not
+  // resumed — that is how a truncated/corrupt partial is caught.
+  fs.writeFileSync(s._partPaths('!node1', 42).buf, Buffer.alloc(50));
+  assert.strictEqual(s.loadPartial('!node1', 42), null);
+  s.clearPartial('!node1', 42);
+  assert.strictEqual(s.loadPartial('!node1', 42), null);
+});
+
+t('a seeded client re-pulls only the missing gaps', () => {
+  const pulls = [];
+  const cc = new chunk.ChunkClient((f) => pulls.push(f));
+  // Stand in for an accepted manifest of a 4-chunk payload.
+  cc.pid = 42; cc.crc = 0; cc.count = 4; cc.len = 4 * chunk.CHUNK_DATA_MAX;
+  cc.buf = Buffer.alloc(cc.len); cc.have = new Set(); cc.haveManifest = true;
+  cc.seed({ buf: null, have: new Set([0, 2]) });   // resume: already have 0 and 2
+  assert.strictEqual(cc.received, 2);
+  cc.requestNext(16);
+  assert.strictEqual(pulls.length, 1);
+  // First missing index is 1, not 0 — the seeded chunks are not re-requested.
+  assert.strictEqual(pulls[0].readUInt16BE(3), 1);
 });
 
 (async () => {

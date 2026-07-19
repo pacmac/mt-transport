@@ -160,6 +160,19 @@ class Client {
         await this._settle(() => c.haveManifest, 20000);
       }
 
+      // --- resume: seed from a persisted partial for this EXACT payload ---
+      // Identity is pid+crc+count+len. A mismatch (a 16-bit pid collision behind
+      // a different image) is rejected and the stale partial cleared, so two
+      // images can never blend. On a match the pull loop below requests only the
+      // gaps. This is what makes an interrupted transfer continue rather than
+      // restart — the point of the whole cycle. See specs/chunk-resume.md.
+      const prior = this.store.loadPartial(t, pid);
+      if (prior && prior.crc === c.crc && prior.count === c.count && prior.len === c.len) {
+        c.seed({ buf: prior.buf, have: prior.have });
+      } else if (prior) {
+        this.store.clearPartial(t, pid); // same pid, different image — discard
+      }
+
       // --- chunks ---
       // PACING IS LOAD-BEARING. A full frame is ~2.2 s of airtime, so a batch of
       // 16 occupies the radio for ~35 s. Re-issuing a pull sooner makes the
@@ -180,8 +193,11 @@ class Client {
       // contiguous run, so re-pulling wastes no airtime on chunks we hold.
       let idle = 0;
       while (Date.now() - started < timeoutMs) {
-        if (c.gone) throw new Error(`pid ${pid}: GONE (evicted)`);
-        if (c.verified) return c.buf;
+        // GONE: the device evicted this pid, so the bytes are unrecoverable and
+        // a saved partial for it is useless — drop it rather than resume into a
+        // payload that no longer exists.
+        if (c.gone) { this.store.clearPartial(t, pid); throw new Error(`pid ${pid}: GONE (evicted)`); }
+        if (c.verified) { this.store.clearPartial(t, pid); return c.buf; }
         if (c.complete && !c.verified) throw new Error(`pid ${pid}: CRC failed after reassembly`);
 
         const before = c.received;
@@ -200,6 +216,13 @@ class Client {
         // contended channel has transient dead patches a recoverable transfer
         // rides through) but bounded, with timeoutMs as the hard ceiling.
         idle = (c.received === before) ? idle + 1 : 0;
+        // Persist progress after any window that delivered chunks, so an
+        // interruption (or a stall abort below) loses at most one window and the
+        // next fetch resumes from here rather than from zero.
+        if (c.received !== before) {
+          this.store.savePartial(t,
+            { pid, crc: c.crc, count: c.count, len: c.len, have: c.have, buf: c.buf });
+        }
         if (idle >= 8) throw new Error(
           `pid ${pid}: stalled at ${c.received}/${c.count} after 8 empty windows`);
       }
