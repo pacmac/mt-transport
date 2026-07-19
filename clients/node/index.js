@@ -131,13 +131,22 @@ class Client {
       // into text commands. The device feeds them to the SAME handler a binary
       // pull would hit, so the two paths cannot drift.
       if (frame[0] === chunk.MSG.GETMANIFEST) {
-        await this.queue.enqueue(cmd.chunkInfo(t), { priority: 1, retries: 1 });
+        // Carry the pid. ChunkClient already encoded it at [1:3]; dropping it
+        // here asked "describe whatever you hold", so a caller fetching pid 1
+        // was handed pid 2's manifest and adopted it, reporting success. We
+        // know the pid we want, so we must ask a question the device can refuse.
+        await this.queue.enqueue(
+          cmd.chunkInfo(t, frame.readUInt16BE(1)), { priority: 1, retries: 1 });
       } else if (frame[0] === chunk.MSG.PULL) {
         // noReply: the device answers with chunks on port 261, not text.
+        // dedupKey MUST include the pid: keyed on offset alone, a pull for
+        // chunk 0 of pid 2 dedups against a pending pull for chunk 0 of pid 1
+        // and is silently dropped. Latent while only one payload exists —
+        // which is exactly the condition this change removes.
         await this.queue.enqueue(
           cmd.chunkPull(t, frame.readUInt16BE(1), frame.readUInt16BE(3), frame[5]),
           { priority: -1, noReply: true,
-            dedupKey: `pull:${frame.readUInt16BE(3)}` });
+            dedupKey: `pull:${frame.readUInt16BE(1)}:${frame.readUInt16BE(3)}` });
       }
     });
     this._fetches.set(pid, c);
