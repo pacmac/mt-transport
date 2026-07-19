@@ -14,3 +14,5 @@ specs/trial-*.md
 *-status*.png
 console-*.log
 page-*.yml
+clients/node/node_modules/
+clients/node/payloads/

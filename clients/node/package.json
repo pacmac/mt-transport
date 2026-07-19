@@ -1,0 +1,16 @@
+{
+  "name": "mt-transport",
+  "version": "0.1.0",
+  "description": "Node client for the PAC private Meshtastic protocol: chunked payload transfer, message queue, on-demand pull, config and commands. Everything the alarm carries that stock Meshtastic does not.",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "dependencies": {
+    "ws": "^8.0.0"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "license": "MIT"
+}
