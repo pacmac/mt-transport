@@ -4,8 +4,11 @@ status: investigated — mechanism established, root cause NOT yet measured
 source_hash: ~
 updated: 2026-07-19
 scope:
-  - mylibs/mt-chunk/src/M5CameraSource.h
-  - projects/pac-garage-alarm/src/main.cpp   # branch chunk-integration — only if a debug command is needed to surface the instrument
+  - mylibs/mt-chunk/src/M5CameraSource.h        # step 1 instrument (done)
+  - projects/pac-garage-alarm/src/main.cpp      # step 1 `cam diag` (done)
+  - projects/mt-transport/clients/node/index.js # step 3 fix — pacing (REDIRECT §7)
+  - projects/mt-transport/clients/node/lib/chunk.js
+  - projects/mt-transport/clients/node/test/run.js
 ---
 
 # Spec: camera-fetch-stall — a proxied chunk fetch stalls partway
@@ -102,6 +105,41 @@ one is *intermittent*, so a retry may or may not apply. **Measure before fixing.
 4. **Verify.** A full live camera fetch completes and CRC-matches the camera's
    own value, **repeatably — at least 3 consecutive runs**. Intermittent bugs
    need repeated success, not one.
+
+## 7. REDIRECT — §3 hypothesis disproven; the real cause and the client fix
+
+§3 predicted `read()` fails → `sendChunk` drops a chunk → stall. **Measured
+false.** With the instrument armed, the `cam diag` counters are all-zero on every
+stall (`seek=0 short=0 offset=0`). `read()` never fails. The camera source is
+exonerated.
+
+What the measurements actually show:
+- Device debug UART during a stall: `sendFails=0` on every batch. `mesh.send()`
+  accepts every chunk.
+- Stall point **varies** across runs (0/42/55/67/86 %). Systematic loss would
+  stall at a fixed index; variable = **random on-air loss**.
+- The device emits telemetry and text replies (each with a 3 s resend) *during*
+  the transfer, and the Omni rebroadcasts all of it — chunks compete with a
+  self-generated storm.
+- The embedded path completes; the camera path does ~200 ms of I2C **per chunk**
+  between sends, widening the half-duplex-deaf window and reshaping timing.
+
+So this is on-air loss under contention. Two fixes are wanted (Peter, 2026-07-19,
+"both need fixing"):
+
+**A. Client pacing robustness — THIS task, steps 3-4 (low risk, no firmware).**
+`index.js fetch()` gives up after **3** zero-progress windows and its pacing is
+tuned for the embedded path. On a lossy channel a transient bad patch trips that
+abort even though the transfer could converge. Make it robust to random loss:
+- smaller default burst (shorter TX bursts collide less, a lost chunk is cheap
+  to re-pull) — `requestNext` already re-pulls only the missing contiguous run;
+- more patience before abort, but **bounded** — the alarm shares this channel,
+  so "retry forever" is not acceptable (`index.js:184-188` says exactly this);
+- driven by re-test, not by feel: the criterion is repeatable success.
+
+**B. Deployed-unit CSMA — SEPARATE cycle, task `adopt-meshtastic-csma` (BUG 14).**
+False CAD → seconds of self-inflicted deafness. The deeper root, but it touches
+the field unit's radio and is its own large `/idiot`. Not done here.
 
 ## 6. Not in scope
 

@@ -167,6 +167,17 @@ class Client {
       // end — observed on air as chunks 2..13 arriving repeatedly while 0, 1 and
       // 14+ never did. Wait for the batch we asked for before asking again.
       const FRAME_AIRTIME_MS = 2200;
+      // A proxied (camera) payload is served with ~200 ms of I2C per chunk, so
+      // its transfer runs longer and overlaps more of the device's own
+      // telemetry + text-reply resends + the Omni rebroadcast. Measured on air,
+      // that contention drops chunks at RANDOM (stalls landed at 0/42/55/67/86%
+      // across runs — a fixed bug would stall at one index). read() was
+      // instrumented and exonerated: the loss is on-air, not at the source.
+      //
+      // So this loop must tolerate transient loss and keep filling gaps, while
+      // staying BOUNDED — the alarm shares this channel, so "retry forever" is
+      // not acceptable. requestNext() already re-pulls only the missing
+      // contiguous run, so re-pulling wastes no airtime on chunks we hold.
       let idle = 0;
       while (Date.now() - started < timeoutMs) {
         if (c.gone) throw new Error(`pid ${pid}: GONE (evicted)`);
@@ -176,18 +187,23 @@ class Client {
         const before = c.received;
         if (!c.requestNext(batch)) { await this._sleep(1000); continue; }
 
-        // Allow the whole requested run to arrive, plus margin for CSMA backoff
-        // and the Omni's rebroadcast, before reconsidering.
+        // End the window as soon as delivery goes quiet, rather than always
+        // waiting the whole batch budget: on a lossy channel the full batch
+        // rarely lands in one window, and ending early re-pulls the gap sooner.
         const budget = batch * FRAME_AIRTIME_MS + 8000;
-        await this._settle(() => c.verified || c.received >= before + batch, budget);
+        await this._settleQuiet(
+          () => c.verified || c.received >= before + batch,
+          () => c.received, budget, 3 * FRAME_AIRTIME_MS);
 
-        // No progress at all across a full batch window => the link is not
-        // delivering. Give up rather than hammer a channel the alarm shares.
+        // Only a window that delivered NOTHING counts toward giving up; any
+        // progress resets the counter. Tolerance is higher than the old 3 (a
+        // contended channel has transient dead patches a recoverable transfer
+        // rides through) but bounded, with timeoutMs as the hard ceiling.
         idle = (c.received === before) ? idle + 1 : 0;
-        if (idle >= 3) throw new Error(
-          `pid ${pid}: stalled at ${c.received}/${c.count} after 3 empty batches`);
+        if (idle >= 8) throw new Error(
+          `pid ${pid}: stalled at ${c.received}/${c.count} after 8 empty windows`);
       }
-      throw new Error(`pid ${pid}: timeout at ${Math.round(c.progress * 100)}%`);
+      throw new Error(`pid ${pid}: timeout at ${Math.round(c.progress * 100)}% (${c.received}/${c.count})`);
     } finally {
       this._fetches.delete(pid);
     }
@@ -201,6 +217,26 @@ class Client {
     while (Date.now() < end) {
       if (cond()) return true;
       await this._sleep(400);
+    }
+    return cond();
+  }
+
+  /**
+   * Like _settle, but also returns early once progress() has stopped changing
+   * for quietMs — i.e. the batch's deliverable chunks have arrived and the rest
+   * were lost. Ending the window then lets the caller re-pull the gap promptly
+   * instead of idling out the whole budget. Returns true only if cond() held.
+   */
+  async _settleQuiet(cond, progress, ms, quietMs) {
+    const end = Date.now() + ms;
+    let last = progress();
+    let lastChange = Date.now();
+    while (Date.now() < end) {
+      if (cond()) return true;
+      const p = progress();
+      if (p !== last) { last = p; lastChange = Date.now(); }
+      else if (Date.now() - lastChange >= quietMs) return false; // gone quiet
+      await this._sleep(300);
     }
     return cond();
   }
