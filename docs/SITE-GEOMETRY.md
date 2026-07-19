@@ -5,14 +5,19 @@ circulating and both are wrong.**
 
 | | |
 |---|---|
-| **Garage → house bearing** | **121.2°** |
-| **House → garage bearing** | **301.2°** |
+| **House → garage bearing** | **121.2°**  (south-east) |
+| **Garage → house bearing** | **301.2°**  (north-west) |
 | **Distance** | **2.501 km** |
+
+**The garage lies SOUTH and EAST of the house.** That sentence is the check:
+121° is SE, so it can only be the house→garage direction. An earlier revision of
+this file had the two swapped — state the compass sense, not just the number.
 
 ## Check the radar table first
 
 `http://192.168.10.205:8000/radar` lists `HOME 121° 2.5km` and shows its centre
-as `51.0263, -3.1588`. It computes this continuously from live position data.
+as `51.0263, -3.1588`. The radar is centred at the HOUSE, so the 121° it shows
+is **house → garage**. It computes this continuously from live position data.
 
 **That is the authoritative source and it should be the first thing consulted.**
 On 2026-07-19 this bearing was laboriously re-derived from raw coordinates while
