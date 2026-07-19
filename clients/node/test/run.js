@@ -17,7 +17,7 @@ console.log('mt-transport node skeleton\n');
 
 t('command builder produces the device grammar', () => {
   assert.strictEqual(cmd.ping('336b'), '@336b ping');
-  assert.strictEqual(cmd.chunkPull('336b', 16, 16), '@336b chunk pull 16 16');
+  assert.strictEqual(cmd.chunkPull('336b', 2, 16, 16), '@336b chunk pull 2 16 16');
   assert.strictEqual(cmd.name('*', 'GRGE'), '@* name GRGE');
 });
 
