@@ -25,8 +25,8 @@ one bug**, none preceded by reading the implementation being fought. This
 document is written after the fact to restore the record, not to imply the
 process was followed.
 
-**Nothing further is to be implemented against this spec until the
-investigation in `specs/m5-camera-i2c.md` completes.**
+That investigation has since completed and the bug is fixed — see §5. The
+process point stands regardless of the outcome.
 
 ---
 
@@ -92,10 +92,15 @@ encoding limits, buffer sizes, nor half-duplex deafness** — which is why a gre
 
 ---
 
-## 5. THE UNRESOLVED BUG, and the process failure around it
+## 5. THE I2C BUG — RESOLVED 2026-07-19, and the process failure around it
 
-The camera **proxy** path (`publishSource` → `M5CameraSource` → I2C) does not
-work. Chunks arrive with correct length and index but wrong payload.
+**Status: FIXED and verified.** Root cause in `specs/m5-camera-i2c.md` §5b, fix
+in `specs/m5-camera-i2c-fix.md`. Live camera frame transferred over LoRa,
+4,753 bytes, CRC `6b734197` matching the camera's own computation. This section
+is kept for the *reasoning record*, not as an open item.
+
+The symptom was: the camera proxy path (`publishSource` → `M5CameraSource` →
+I2C) delivered chunks with correct length and index but wrong payload.
 
 Best evidence, a diff against a serial dump of the *same* frame:
 
@@ -120,11 +125,23 @@ Wire slave source**:
 6. warm-up read to absorb one stale serve
 7. pipelined seek — stage window *k+1*, read window *k*
 
-Attempt 7 is **uncommitted and untested**; the session was stopped before it ran.
+Attempt 7 was never tested and has been **discarded**, superseded by the real
+fix.
+
+**THE ACTUAL CAUSE, for contrast with all seven guesses:** on classic ESP32 the
+read clock-stretch path is compiled out, so `onRequest` runs at STOP of an
+already-finished read; and `Wire.write()` in slave mode only fills a RAM buffer
+flushed *after* the callback returns. Data written there serves the **next**
+read. The slave was structurally one read behind and **no master-side change
+could ever have worked** — which is why none of the seven did.
+
+The fix was to load the hardware FIFO from `onReceive` via the public
+`Wire.slaveWrite()`, removing the lag at source.
 
 **The lesson, recorded because it is the point:** the one measurement that
 actually explained the behaviour — logging I2C from the *camera's* side — was
-the fifth thing tried, after four guesses. It should have been the first.
+the fifth thing tried, after four guesses. Reading the framework source took
+minutes and gave the answer outright. Both should have come first.
 See memory `no-patching-over-patches`.
 
 ---
@@ -135,8 +152,8 @@ See memory `no-patching-over-patches`.
 |---|---|---|
 | `pac-garage-alarm` | `src/main.cpp`, `include/test_image.h`, `platformio.ini` | committed `1cb2072`, `5696e3a` |
 | `mylibs/mt-chunk` | `src/MtChunk.{h,cpp}` | committed `90d244e`, `9ba7d7a` |
-| `mylibs/mt-chunk` | `src/M5CameraSource.h` | **uncommitted** — attempt 7 |
-| `timercam-chunk` | `src/main.cpp` | committed `f714997`; **uncommitted** I2C instrumentation |
+| `mylibs/mt-chunk` | `src/M5CameraSource.h` | committed `3dfe0d4` — the real fix |
+| `timercam-chunk` | `src/main.cpp` | committed `f714997`, `5f6de2f` — the real fix |
 
 **NOT changed:** `mt-transport` library itself; `pac-garage-alarm` main branch.
 
@@ -208,7 +225,8 @@ a 300 s heartbeat, and I nearly reported the fiction as fact.
 
 ---
 
-## 8. Next step is INVESTIGATION, not code
+## 8. Next step
 
-`specs/m5-camera-i2c.md` owns the I2C transport problem. No further edits to
-`M5CameraSource.h` or the camera firmware until that investigation reports.
+The I2C transport is fixed. The next item is the **payload-identity defect** in
+`specs/m5-camera-i2c-fix.md` §9 — requesting one pid returns another and reports
+success. It needs its own `/idiot` cycle: task, spec, diffs, then implement.
