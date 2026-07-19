@@ -13,6 +13,28 @@ circulating and both are wrong.**
 121° is SE, so it can only be the house→garage direction. An earlier revision of
 this file had the two swapped — state the compass sense, not just the number.
 
+## DO NOT AIM THE ANTENNA BY THIS BEARING
+
+The geometric bearing is **not** the best aim. Measured 2026-07-19:
+
+| antenna aim | error vs geometric 301.2° | measured SNR |
+|---|---|---|
+| ~312° (before the swap) | 10.8° off | **−5.0 dB** |
+| ~300° (after the swap) | 1.2° off | **−17.2 dB** |
+
+Aiming it *more* accurately by geometry made it **12 dB worse**. At 2.5 km over
+terrain the strongest path is often not the direct line — diffraction or a
+reflection can put the optimum well off the geometric bearing. **312° is
+empirically validated; 301.2° is only arithmetic.**
+
+Note also that 12° of aim error on a ~12 dBi Yagi is worth roughly **1 dB**, not
+12 — so most of that loss is something else (connector, pigtail, a different
+antenna arriving with the swapped unit). Aim by measurement, and check the RF
+connection before blaming direction.
+
+A live peaking readout is at `scratchpad/peak_antenna.py` — prints SNR with a
+bar every time the gateway hears the unit.
+
 ## Check the radar table first
 
 `http://192.168.10.205:8000/radar` lists `HOME 121° 2.5km` and shows its centre
@@ -74,6 +96,9 @@ point*, almost certainly the duplicated row.
 ## Why it matters
 
 The link runs at roughly **0.3 dB above the SF11 demodulation floor**
-(−17.2 dB SNR measured 2026-07-19, against a limit near −17.5 dB). A directional
-antenna has no margin to absorb a 10° aiming error. Getting this bearing right
-is not a tidiness exercise.
+(−17.2 dB SNR measured 2026-07-19, against a limit near −17.5 dB) — with no
+margin to spare.
+
+But note the section above: aiming by this bearing is what *produced* that
+figure. The number here is for distance, geometry and sanity-checking the map.
+**Aim by measurement.**
