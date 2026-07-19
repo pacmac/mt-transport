@@ -761,16 +761,42 @@ delay) *before* the force, so its successes cannot reset the counter either.
 | `pac-garage-alarm/src/main.cpp` | `@wedge` verb; `help` list |
 | `specs/radio-wedge-recovery.md` | this section |
 
-### STEP 5 RESULT — PASSED on hardware, 2026-07-18
+### STEP 5 RESULT — PASSED on hardware, re-run rigorously 2026-07-19
+
+The first attempt (2026-07-18) was **INCONCLUSIVE and was overclaimed as a
+pass**. It captured only a single post-hoc frame showing `rst=2`; it never
+observed the baseline, the silent gap, or the timing. `rst` persists from the
+previous boot, so `rst=2` alone proves nothing.
+
+Re-run with full capture:
 
 ```
-boot=1 rst=2 txfs=0 csma=7          (HOME, port-260 debug frame)
+[08:04:29] (baseline)         boot=1 rst=2 txfs=0 csma=2583
+[08:04:49] >>> @b80f wedge
+[08:05:33] (+44s) [gap 64s]   boot=1 rst=2 txfs=0 csma=0
 ```
 
-**`rst=2` = DOG.** The watchdog fired. `@wedge` forced the streak, `wdtFeed()`'s
-guard stopped feeding, and the node reset itself. The recovery path is proven
-end to end on real hardware: a node that stops transmitting no longer stays
-mute until someone drives to it.
+**The proof is `csma`: 2583 -> 0.** `csmaDeferrals()` is monotonic and resets
+only at boot, so a cumulative counter going backwards is an unambiguous reboot.
+`rst=2` (DOG) then identifies it as a watchdog reset, and the 64 s gap plus
++44 s timing (WDT <=30 s + boot + first frame) fit the mechanism exactly.
+
+Note `rst=2` was ALSO the baseline value — left from the prior watchdog reset.
+The originally stated pass criterion ("a frame showing rst=2 after the wedge")
+was therefore insufficient on its own and would not have caught a false pass.
+The discriminator has to be a counter that cannot go backwards.
+
+#### Heartbeat rate materially affects whether the guard fires
+
+At `interval 60` the wedge frequently did NOT reset the node; at `interval 300`
+it did. Cause: any SUCCESSFUL transmit clears `txFailStreak` and reopens the
+gate, so a heartbeat landing inside the 30 s watchdog window cancels the wedge.
+
+This is correct behaviour, not a bug — a radio that still works intermittently
+should not reboot the node — but it has a real field consequence: recovery
+requires TX_FAIL_LIMIT *consecutive* failures, so on DEV1's 300 s beat a
+genuinely dead radio takes up to ~30 minutes before the watchdog is even
+permitted to fire.
 
 #### Two findings that only emerged by testing
 
