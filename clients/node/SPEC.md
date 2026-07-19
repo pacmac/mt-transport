@@ -44,9 +44,15 @@ This module is the single place that knows the private protocol.
 
 Verified against the live gateway on 2026-07-19:
 
-**Receive is unrestricted.** mesh-gw emits any unregistered portnum as a
-`private_app` event on `ws://<host>/events` carrying `payload_b64`. Ports 260
-and 261 both arrive intact with no gateway changes.
+**Receive is unrestricted.** Any unregistered portnum is emitted as a
+`private_app` event carrying `payload_b64` on `ws://<gateway-host>/events`.
+Ports 260 and 261 both arrive intact with no gateway changes.
+
+*The event is built by mesh-gw's `app_router.py`, but that names the SERVICE, not
+a port.* Measured 2026-07-19: `192.168.10.205:8000` fronts both the send route
+(`POST /<nodeId>/messages`) and the event stream, so a single `host` serves both
+— which is what `Client` assumes. Whether that is a proxy or co-located services
+has not been established and this module does not depend on it.
 
 **Send is text-only.** mesh-gw exposes send for text, admin and traceroute.
 There is **no arbitrary-portnum send path**.
@@ -137,10 +143,21 @@ reassembly — stale pid, misordered chunk — is exactly what it exists to catc
 The reference value `0x65FBD5D9` for the test image is agreed by four
 independent implementations.
 
-Verified: `clients/node/test/` parses the **exact bytes the C++ `ChunkServer`
-emits**, produced by `mylibs/mt-chunk/test/dump_frames`. 13 assertions covering
-manifest decode, full reassembly, gap detection, duplicate and reordered
-delivery, corruption detection and stale-pid rejection.
+Verified by `test/cross-cpp.js`, which parses the **exact bytes the C++
+`ChunkServer` emits** — produced by `dump_frames`, the real device-side encoder.
+13 assertions: manifest decode, full reassembly, byte-identical output, gap
+detection, duplicate and reordered delivery, corruption detection, stale-pid
+rejection, and a 237-byte frame bound.
+
+```sh
+npm run test:cross
+```
+
+`dump_frames` lives in **`pio/mylibs/mt-chunk`**, a *sibling* of `projects/` —
+not under this repo. An earlier revision of this document implied otherwise and
+also claimed these 13 assertions existed here when they only existed in the
+mt-chunk library; node-dash caught both. The test is now genuinely in this
+module and runs green against the compiled encoder.
 
 ---
 

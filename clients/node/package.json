@@ -4,7 +4,8 @@
   "description": "Node client for the PAC private Meshtastic protocol: chunked payload transfer, message queue, on-demand pull, config and commands. Everything the alarm carries that stock Meshtastic does not.",
   "main": "index.js",
   "scripts": {
-    "test": "node test/run.js"
+    "test": "node test/run.js && node test/cross-cpp.js /tmp/frames.bin $MTC_FIXTURE",
+    "test:cross": "MTC=/usr/share/pac/dev/pio/mylibs/mt-chunk; $MTC/test/dump_frames $MTC/test/fixtures/real_ov3660_outdoor.jpg /tmp/frames.bin && node test/cross-cpp.js /tmp/frames.bin $MTC/test/fixtures/real_ov3660_outdoor.jpg"
   },
   "dependencies": {
     "ws": "^8.0.0"

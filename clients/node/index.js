@@ -28,7 +28,18 @@ class Client {
   constructor(o) {
     this.host = o.host;
     this.gatewayId = o.gatewayId;
-    this.channel = o.channel ?? 2;
+    // HARD RULE, no exceptions: never transmit on PRIMARY (channel 0). These
+    // devices listen on a private channel and PRIMARY is the public mesh —
+    // sending there leaks alarm traffic and commands to every node in range.
+    // channel defaults to 0 everywhere in the Meshtastic API, so an unset value
+    // is the dangerous case and must be rejected rather than defaulted.
+    if (o.channel === 0) {
+      throw new Error('channel 0 (PRIMARY) is forbidden — use the private channel index');
+    }
+    if (o.channel === undefined || o.channel === null) {
+      throw new Error('channel must be given explicitly — it must never default to 0/PRIMARY');
+    }
+    this.channel = o.channel;
     this.store = new PayloadStore({ dir: o.payloadDir || './payloads' });
 
     this.events = new MeshEvents({ host: this.host });
@@ -57,6 +68,9 @@ class Client {
   // ---- outbound --------------------------------------------------------------
 
   async _sendText(text) {
+    // Belt and braces: the constructor rejects 0, but a caller mutating
+    // .channel afterwards must not be able to reach PRIMARY either.
+    if (!this.channel) throw new Error('refusing to send on channel 0 (PRIMARY)');
     const r = await fetch(`http://${this.host}/${this.gatewayId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -117,28 +131,69 @@ class Client {
       // into text commands. The device feeds them to the SAME handler a binary
       // pull would hit, so the two paths cannot drift.
       if (frame[0] === chunk.MSG.GETMANIFEST) {
-        await this.queue.enqueue(cmd.chunkInfo(t), { priority: -1, retries: 1 });
+        await this.queue.enqueue(cmd.chunkInfo(t), { priority: 1, retries: 1 });
       } else if (frame[0] === chunk.MSG.PULL) {
+        // noReply: the device answers with chunks on port 261, not text.
         await this.queue.enqueue(
           cmd.chunkPull(t, frame.readUInt16BE(3), frame[5]),
-          { priority: -1, retries: 1, dedupKey: `pull:${frame.readUInt16BE(3)}` });
+          { priority: -1, noReply: true,
+            dedupKey: `pull:${frame.readUInt16BE(3)}` });
       }
     });
     this._fetches.set(pid, c);
     try {
       const started = Date.now();
-      await c.requestManifest(pid);
+
+      // --- manifest ---
+      while (!c.haveManifest) {
+        if (Date.now() - started > timeoutMs) throw new Error(`pid ${pid}: no manifest`);
+        await c.requestManifest(pid);
+        await this._settle(() => c.haveManifest, 20000);
+      }
+
+      // --- chunks ---
+      // PACING IS LOAD-BEARING. A full frame is ~2.2 s of airtime, so a batch of
+      // 16 occupies the radio for ~35 s. Re-issuing a pull sooner makes the
+      // device RESTART the batch from the first gap, and it never reaches the
+      // end — observed on air as chunks 2..13 arriving repeatedly while 0, 1 and
+      // 14+ never did. Wait for the batch we asked for before asking again.
+      const FRAME_AIRTIME_MS = 2200;
+      let idle = 0;
       while (Date.now() - started < timeoutMs) {
         if (c.gone) throw new Error(`pid ${pid}: GONE (evicted)`);
         if (c.verified) return c.buf;
         if (c.complete && !c.verified) throw new Error(`pid ${pid}: CRC failed after reassembly`);
-        if (!c.haveManifest) { await c.requestManifest(pid); continue; }
-        if (!c.requestNext(batch)) await new Promise((r) => setTimeout(r, 1000));
+
+        const before = c.received;
+        if (!c.requestNext(batch)) { await this._sleep(1000); continue; }
+
+        // Allow the whole requested run to arrive, plus margin for CSMA backoff
+        // and the Omni's rebroadcast, before reconsidering.
+        const budget = batch * FRAME_AIRTIME_MS + 8000;
+        await this._settle(() => c.verified || c.received >= before + batch, budget);
+
+        // No progress at all across a full batch window => the link is not
+        // delivering. Give up rather than hammer a channel the alarm shares.
+        idle = (c.received === before) ? idle + 1 : 0;
+        if (idle >= 3) throw new Error(
+          `pid ${pid}: stalled at ${c.received}/${c.count} after 3 empty batches`);
       }
       throw new Error(`pid ${pid}: timeout at ${Math.round(c.progress * 100)}%`);
     } finally {
       this._fetches.delete(pid);
     }
+  }
+
+  _sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  /** Poll until cond() or ms elapses. Cheap; the radio is the slow part. */
+  async _settle(cond, ms) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (cond()) return true;
+      await this._sleep(400);
+    }
+    return cond();
   }
 
   /** Fetch and write out. Returns the path. */
