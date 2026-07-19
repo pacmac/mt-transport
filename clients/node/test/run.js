@@ -7,6 +7,7 @@ const assert = require('assert');
 const { cmd, target, parse260, parseAdverts, CommandQueue, chunk } = require('../index');
 
 let pass = 0;
+let skipped = 0;
 const jobs = [];
 const t = (name, fn) => jobs.push(async () => {
   try { await fn(); pass++; console.log(`  ok  ${name}`); }
@@ -19,6 +20,19 @@ t('command builder produces the device grammar', () => {
   assert.strictEqual(cmd.ping('336b'), '@336b ping');
   assert.strictEqual(cmd.chunkPull('336b', 2, 16, 16), '@336b chunk pull 2 16 16');
   assert.strictEqual(cmd.name('*', 'GRGE'), '@* name GRGE');
+});
+
+t('chunkInfo distinguishes discovery from a validated query', () => {
+  // Bare form is DISCOVERY — "describe whatever you hold" — the only way a
+  // caller learns a pid it does not yet know. It must stay pid-less.
+  assert.strictEqual(cmd.chunkInfo('336b'), '@336b chunk info');
+  // With a pid it is a VALIDATED query the device can refuse with GONE/NOSUCH.
+  // A caller that knows the pid must use this form, or it gets whatever the
+  // device happens to hold and is told that was a success.
+  assert.strictEqual(cmd.chunkInfo('336b', 2), '@336b chunk info 2');
+  // pid 0 must not collapse to the bare form — `undefined` selects discovery,
+  // and 0 is a value, not an absence.
+  assert.strictEqual(cmd.chunkInfo('336b', 0), '@336b chunk info 0');
 });
 
 t('target rejects whitespace (would break device tokenising)', () => {
@@ -77,12 +91,25 @@ t('chunk codec round-trips a pull frame', () => {
 
 t('crc32 matches the value agreed by device, camera and python', () => {
   const fs = require('fs');
-  const p = '../../../../mylibs/mt-chunk/test/fixtures/real_ov3660_outdoor.jpg';
-  if (!fs.existsSync(p)) { console.log('     (fixture absent, skipped)'); return; }
+  // Resolve from __dirname, NOT the cwd. This path used to be cwd-relative, so
+  // it only found the fixture when the suite happened to be run from
+  // clients/node; run from the repo root it silently skipped AND still printed
+  // `ok`. The one check backing "CRC32 agrees across four implementations" was
+  // therefore not running, while reporting that it had — the same
+  // wrong-answer-that-looks-right failure this whole task is about.
+  const p = require('path').resolve(
+    __dirname, '../../../../../mylibs/mt-chunk/test/fixtures/real_ov3660_outdoor.jpg');
+  if (!fs.existsSync(p)) {
+    // mylibs is a sibling repo, so a standalone checkout may genuinely lack it.
+    // Loud, and NOT counted as a pass — a silent skip is what hid this.
+    console.log(`  SKIP  fixture missing: ${p}`);
+    skipped++;
+    return;
+  }
   assert.strictEqual(chunk.crc32(fs.readFileSync(p)) >>> 0, 0x65FBD5D9);
 });
 
 (async () => {
   for (const j of jobs) await j();
-  console.log(`\n${pass} passed`);
+  console.log(`\n${pass} passed${skipped ? `, ${skipped} SKIPPED` : ''}`);
 })();
