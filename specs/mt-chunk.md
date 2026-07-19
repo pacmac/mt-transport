@@ -1,10 +1,11 @@
 ---
 task: mt-chunk
 status: active
-source_hash:  # steps 1,5,6,7 implemented (mylibs commit 16efaa3); 2,3 pending; 4 revised
-  mylibs/mt-chunk/src/MtChunk.h: 1d4685729ba193507e42b0284d40aaa67cd95cac616befee8d641f6be8e15965
-  mylibs/mt-chunk/src/MtChunk.cpp: ae9da365c5d6302e48539dec892edde010bd21f4c382c2bbf75e7788070cbdb3
+source_hash:  # steps 1,4,5,6,7 done (mylibs 41a89c8); 2,3 pending; 8 = on-air, outstanding
+  mylibs/mt-chunk/src/MtChunk.h: fae6f5954224bb2c2108c26bc7a68a84b4bf97d75cc453fe3f542610e9471069
+  mylibs/mt-chunk/src/MtChunk.cpp: 963a781a5b012fb9aacc8f8689f10936a1dee92ddd2dc6a940382eee7d02c1b8
   mylibs/mt-chunk/src/MtChunkCrc.h: 330d5758523dd2015856e21f595ab61eb648ff8ad8465e30dc52c8992aafdada
+  mylibs/mt-chunk/src/M5CameraSource.h: 6f104265dd7a6fee170ec64b5e0d2cba6b497344d45ed5371ad50437f91e978c
 updated: 2026-07-19
 scope: NEW library at pio/mylibs/mt-chunk (does not modify mt-transport or pac-garage-alarm)
 ---
@@ -161,7 +162,7 @@ The M5Stack Timer Camera X has **8 MB PSRAM**. It is the natural store; the
 RAK4631 holds **one chunk at a time (230 bytes)**, not the image.
 
 ```
-  pull(idx) ──▶ RAK ──UART──▶ camera: "bytes [idx*230, +230)"
+  pull(idx) ──▶ RAK ──I2C───▶ camera: "bytes [idx*230, +230)"
                 RAK ◀────────  230 bytes
   chunk    ◀── RAK
 ```
@@ -209,19 +210,60 @@ byte-range server over UART:
 That is `IPayloadSource` on the wire. Note the CRC must come **from the camera**,
 because the RAK never holds the whole payload — see the 28 KB finding above.
 
-**Open questions, to verify against the schematic rather than assume:**
+### RESOLVED 2026-07-19 — pinout from docs.m5stack.com/en/unit/timercam_x
 
-1. **External wake.** The documented wake sources are the RTC alarm and the
-   power button. Whether the RAK can assert wake on a pin — and which pin —
-   needs checking against the board schematic. If there is no clean external
-   wake, the fallback is the camera waking on its own RTC schedule and polling
-   the RAK, which costs latency and battery but works. **Do not design around
-   an external wake until it is confirmed.**
-2. **UART pins on the RAK side.** `Serial1` (P0.15/P0.16) is already the debug
-   mirror and must not be reused; a second UART or different WisBlock pins are
-   needed. At 115200 a 15 KB image transfers in ~1.3 s, so speed is not the
-   constraint — pin availability is.
-3. Grove on the camera is I2C by default; bulk transfer wants UART.
+| function | GPIO |
+|---|---|
+| **Grove HY2.0 (the external 4-pin connector)** | **SCL = G13, SDA = G4** |
+| Battery hold | G33 |
+| Battery ADC | G38 |
+| LED | G2 |
+| RTC BM8563 (own bus, untouched) | SCL G14, SDA G12 |
+| OV3660 | XCLK 27, SIOD 25, SIOC 23, VSYNC 22, HREF 26, PCLK 21, RESET 15, D0–D7 = 32,35,34,5,39,18,36,19 |
+
+Also corrected: the battery is **140 mAh**, not the 270 mAh I nearly asserted.
+
+**Wake — the open question, now answered.** M5 documents **no external wake
+pin**; the listed sources are the RTC alarm and the reset button. But both Grove
+pins are RTC-capable GPIOs (G4 = RTC_GPIO10, G13 = RTC_GPIO14), so **ESP32 ext0
+deep-sleep wake works on them**: the RAK pulls SCL low. Safe as a signal because
+an I2C START is SDA falling *while SCL is high*, so holding SCL low cannot be
+mistaken for a transaction.
+
+**The cost, stated rather than glossed:** this is **not** the 2 µA in M5's
+specs. That figure is for the BM8563 cutting power via G33, where the ESP32 is
+genuinely off — and a powered-off ESP32 cannot watch a pin. Expect **~10 µA**.
+On 140 mAh that is still over a year, and it buys on-demand capture that a
+scheduled RTC wake cannot. If that trade ever looks wrong, the fallback is
+RTC-scheduled wake plus polling, at the cost of capture latency.
+
+`G33` must be latched HIGH as the first statement in `setup()`, or the RTC drops
+power out from under the board mid-boot.
+
+**I2C, not UART** — decided on pin cost. The RAK already runs `Wire` for the
+BME680, so the camera costs it **no additional pins**. UART would need a second
+UARTE and pins the WisBlock cannot spare, since `Serial1` is the debug mirror
+and must not be reused.
+
+**Resolution is deliberately QVGA 320×240 @ quality 12.** The OV3660 will do
+2048×1536, which at 230 bytes per chunk is thousands of frames of airtime — not
+a payload, an outage.
+
+Implemented in `pio/projects/timercam-chunk` (builds clean: 420 KB flash, 10.9%
+RAM) and `mylibs/mt-chunk/src/M5CameraSource.h`. **NOT FLASHED** — the unit runs
+Peter's ESPHome (WiFi, camera, battery monitoring), which this would overwrite.
+That is his call, and the config is worth saving first.
+
+**Remaining open questions:**
+
+1. **Bench-prove the I2C link.** Nothing here has run on hardware. The ESP32
+   I2C *slave* implementation is the least certain part — clock stretching and
+   the `onRequest` path under load both want checking with a scope or at least
+   a soak test.
+2. **Measure the actual deep-sleep current** rather than trusting the ~10 µA
+   estimate above. It sets the battery life for the whole camera subsystem.
+3. **Confirm capture-to-ready latency** so `M5CameraSource::capture()`'s poll
+   timeout (currently 1500 ms) is grounded in measurement.
 
 **Sequencing that protects the alarm:** motion → alarm goes out *immediately*;
 capture happens in parallel; the image is then merely *advertised*
