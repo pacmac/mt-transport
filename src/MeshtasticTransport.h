@@ -216,7 +216,11 @@ private:
         uint32_t txAfter;   // millis() gate — do not transmit before this
         uint8_t  attempts;  // CSMA backoff count; >=8 fails open (transmit anyway)
     };
-    static const uint8_t TXQ_N = 8;   // holds a full heartbeat bundle without blocking
+    // Sized to hold a heartbeat bundle (6) PLUS an in-flight chunk pull batch
+    // (node-dash pulls 4) PLUS a command reply, so a chunk transfer coinciding
+    // with a heartbeat never overflows the queue and silently drops a frame.
+    // (ChunkServer::onFrame enqueues the whole pulled batch in one call.)
+    static const uint8_t TXQ_N = 16;
     TxItem   _txq[TXQ_N];
     uint8_t  _txHead = 0, _txCount = 0;
     TxState  _txState = TX_IDLE;
