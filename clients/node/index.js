@@ -125,7 +125,16 @@ class Client {
    * Throws on GONE, CRC failure, or timeout — never returns a partial, because
    * a plausible-but-wrong image is worse than no image.
    */
-  async fetch(t, pid, { timeoutMs = 300000, batch = 16, onProgress, deadlineMs } = {}) {
+  async fetch(t, pid, { timeoutMs = 300000, batch = 16, onProgress, deadlineMs,
+    // Pacing timers. Defaults are the radio-tuned values (a chunk lands ~2.2 s
+    // after its pull); the offline L0 harness overrides them down to milliseconds
+    // to test the loop LOGIC deterministically with no radio. Changing them here
+    // changes ONLY how long the loop waits, never what it does — see offline-fetch.js.
+    answerMs = 6000,                         // wait for the device's answer to a pull
+    batchMs = batch * 2200 + 4000,           // then for the rest of the batch to land
+    pollMs = 150,                            // poll granularity inside those waits
+    idleSleepMs = 1000,                      // pause when nothing is outstanding to pull
+  } = {}) {
     const c = new chunk.ChunkClient(async (frame) => {
       // The gateway cannot send raw portnums, so pull frames are decoded back
       // into text commands. The device feeds them to the SAME handler a binary
@@ -182,8 +191,8 @@ class Client {
       // MSG_BUSY. requestNext() re-pulls only the missing contiguous run.
       // Reliability over speed. See specs/chunk-flow-control.md.
       const hardMs = deadlineMs != null ? deadlineMs : timeoutMs;
-      const ANSWER_MS = 6000;                 // wait for the device's answer to a pull
-      const BATCH_MS  = batch * 2200 + 4000;  // then for the rest of the batch to land
+      const ANSWER_MS = answerMs;             // wait for the device's answer to a pull
+      const BATCH_MS  = batchMs;              // then for the rest of the batch to land
       const emit = () => { if (onProgress) { try { onProgress(
         { received: c.received, count: c.count, batch, elapsedMs: Date.now() - started });
       } catch { /* a throwing progress cb must never break the transfer */ } } };
@@ -198,14 +207,14 @@ class Client {
 
         const before = c.received;
         c.clearBusy();                        // fresh pull: reset the BUSY latch
-        if (!c.requestNext(batch)) { await this._sleep(1000); continue; }
+        if (!c.requestNext(batch)) { await this._sleep(idleSleepMs); continue; }
 
         // Wait for the device's answer: chunks start arriving, a BUSY latch, or
         // silence — whichever first.
         const answerBy = Date.now() + ANSWER_MS;
         while (Date.now() < answerBy && Date.now() - started < hardMs) {
           if (c.verified || c.received > before || c.busyUntil > Date.now()) break;
-          await this._sleep(150);
+          await this._sleep(pollMs);
         }
 
         if (c.busyUntil > Date.now()) {
@@ -222,7 +231,7 @@ class Client {
           const batchBy = Date.now() + BATCH_MS;
           while (Date.now() < batchBy && Date.now() - started < hardMs) {
             if (c.verified || c.received >= before + batch || c.busyUntil > Date.now()) break;
-            await this._sleep(150);
+            await this._sleep(pollMs);
           }
           emit();
           // Persist after any progress so an interruption resumes from here.

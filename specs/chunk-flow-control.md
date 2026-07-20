@@ -10,6 +10,7 @@ scope:
   - projects/mt-transport/clients/node/index.js
   - projects/mt-transport/clients/node/lib/chunk.js
   - projects/mt-transport/clients/node/test/run.js
+  - projects/mt-transport/clients/node/test/offline-fetch.js
 ---
 
 # Spec: chunk-flow-control — the device drives the pace
@@ -94,6 +95,17 @@ fallback). This is the resolution to "one end or both": **device drives, client 
 
 ## 6. Test plan — each layer independent (Peter)
 
+- **Layer 0** (OFFLINE, no radio, deterministic) — `test/offline-fetch.js`. The C++
+  chunk *protocol* already has an offline harness (`mt-chunk/test/test_chunk.cpp` +
+  `fake_transport.h`, passes 50 % loss) but the **JS `fetch` pacing loop** — where
+  every failed on-air fix lived — had NONE, so it was only ever exercised on-air
+  (flaky, non-deterministic). L0 closes that: a fake ChunkServer (serves MANIFEST +
+  CHUNKs for the test image, emits MSG_BUSY on a seeded schedule) behind a FakeLink
+  (seeded loss / dup / reorder) drives the REAL `Client.fetch`. Asserts it completes
+  and CRC-verifies under loss+BUSY, in ms, repeatably. To keep it fast the fetch
+  timing constants (`answerMs`/`batchMs`/`pollMs`/`idleSleepMs`) become **injectable
+  opts** with the current radio-tuned values as defaults — on-air behaviour unchanged.
+  L0 must be green before flashing for Layer A.
 - **Layer A** (pid 1, program flash → mesh → client, **camera OUT**): build the
   device retry-after + client-obey with a **FIXED** gap (`min==max`) first — isolates
   "is the radio/chunking reliable" from "is the adaptation right." Bar: **10/10
