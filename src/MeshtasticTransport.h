@@ -117,13 +117,14 @@ public:
     bool busy() const { return _txState != TX_IDLE || _txCount > 0; }
 
     // Meshtastic contention model (RadioInterface::getTxDelayMsec). NOT a delay():
-    // returns how many ms to SCHEDULE a transmit ahead — a random multiple of a
-    // slot time, drawn from a window whose size grows with channel utilisation.
-    // Every enqueue uses getTxDelayMsec() by default. getTxDelayMsecWeighted(snr)
-    // biases by the received SNR (used for replies). scheduleNextTxIn() overrides
-    // the scheduled delay for the NEXT enqueued frame only (reply + spaced resend).
+    // how many ms to SCHEDULE a transmit ahead — a random multiple of a slot time
+    // from a window whose size grows with channel utilisation. Every enqueue uses
+    // it by default. scheduleNextTxIn() overrides the scheduled delay for the NEXT
+    // enqueued frame only (used to space a reply's resend behind the reply).
+    // (MT's SNR-weighted variant is deliberately NOT provided: it delays STRONG
+    // links longest — a flood-rebroadcast priority rule that is wrong for a direct
+    // reply, and this transport does not rebroadcast.)
     uint32_t getTxDelayMsec();
-    uint32_t getTxDelayMsecWeighted(float snr);
     void     scheduleNextTxIn(uint32_t ms) { _nextTxDelay = ms; _nextTxDelaySet = true; }
 
     // Radio only — CPU sleep is yours. Both return whether the radio

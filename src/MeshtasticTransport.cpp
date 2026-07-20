@@ -158,18 +158,6 @@ uint32_t MeshtasticTransport::getTxDelayMsec()
     return (_rng ? _rng() % span : 0) * _slotTimeMsec;
 }
 
-// MT RadioInterface::getTxDelayMsecWeighted (non-router branch) — SNR-weighted:
-// a strong link (high SNR) waits longer, yielding first to weaker/distant nodes.
-// Offset by 2*CWMAX slots so replies fall behind any router rebroadcast. Used for
-// command replies, where we know the received command's SNR.
-uint32_t MeshtasticTransport::getTxDelayMsecWeighted(float snr)
-{
-    if (snr < -20.0f) snr = -20.0f;
-    if (snr > 10.0f)  snr = 10.0f;
-    uint8_t cw = CWMIN + (uint8_t)(((snr + 20.0f) * (CWMAX - CWMIN)) / 30.0f); // map -20..10
-    uint32_t span = 1u << cw;
-    return (2u * CWMAX * _slotTimeMsec) + (_rng ? _rng() % span : 0) * _slotTimeMsec;
-}
 
 // Choke point for the actual transmit: airtime accounting + startTransmit. The
 // chip is in standby here (CAD left it there; or RX on the fail-open path, which
