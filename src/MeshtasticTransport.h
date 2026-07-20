@@ -176,10 +176,14 @@ public:
     // air_util_tx = airTxMs/airWindowMs is honest in any mode; channel util
     // = (airTxMs+airRxMs)/airWindowMs is meaningful ONLY while continuously
     // listening (a sleeping node hears almost nothing).
-    uint32_t airTxMs() const { return _txAirMs; }
-    uint32_t airRxMs() const { return _rxAirMs; }
+    // Accumulated internally in MICROSECONDS and divided here, because
+    // getTimeOnAir() returns µs: dividing per packet discarded up to 999 µs each
+    // time, and the error only ever accrued downward. Same accessors, same ms units
+    // — only the accuracy changes.
+    uint32_t airTxMs() const { return _txAirUs / 1000; }
+    uint32_t airRxMs() const { return _rxAirUs / 1000; }
     uint32_t airWindowMs() const { return millis() - _airWindowStart; }
-    void resetAirWindow() { _txAirMs = 0; _rxAirMs = 0; _airWindowStart = millis(); }
+    void resetAirWindow() { _txAirUs = 0; _rxAirUs = 0; _airWindowStart = millis(); }
 
     // Introspection for oracles/tests: the exact frame last transmitted.
     const uint8_t *lastFrame() const { return _frame; }
@@ -246,7 +250,10 @@ private:
     uint32_t _txFailStreak = 0;
     uint32_t _txDropped = 0;
     uint32_t _rxDroppedByTx = 0;
-    uint32_t _txAirMs = 0, _rxAirMs = 0, _airWindowStart = 0;
+    // MICROSECONDS (see airTxMs/airRxMs). uint32_t wraps at ~71 min of ACCUMULATED
+    // airtime; resetAirWindow() runs each telemetry interval, so a window holds
+    // seconds. Noted rather than guarded.
+    uint32_t _txAirUs = 0, _rxAirUs = 0, _airWindowStart = 0;
 
     bool isDuplicate(uint32_t from, uint32_t id);
     void armRx();                 // startReceive() + set _rxActive

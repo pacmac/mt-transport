@@ -1,10 +1,10 @@
 ---
 task: airtime-accounting-fixes
-status: active
-source_hash:  # step 1 (transmitFrame) implemented; steps 2-7 outstanding
-  src/MeshtasticTransport.cpp: 3018154f054a02b5f8ca307150cb7f0aff7a5de75ee60a04dc4500e9b9fcbfc9
-  src/MeshtasticTransport.h: ffadf37f6e2dc44d3a767c38768be75eedc0cf3c02216f7a02f84186f4dfa1ae
-updated: 2026-07-18
+status: F1-F4 implemented 2026-07-20 (260720-6). F7 REOPENED — see below.
+source_hash:  # F1-F4 (steps 2-5) landed; F7 reopened by measurement; step 6 outstanding
+  src/MeshtasticTransport.cpp: 6257cbcbaf5535f274280c6858106bf9d4e2df40aedc425e3df2733d160221ef
+  src/MeshtasticTransport.h: c15d910cecb57150815e3a076045cc1294215b129231a66d4843b9ed087af200
+updated: 2026-07-20
 ---
 
 # Spec: airtime-accounting-fixes — make 0.4.0's counters honest
@@ -36,9 +36,74 @@ they return change.
 Wire format untouched. `docs/wire-format.md`, `docs/rx-and-commands.md`
 unaffected.
 
+## RE-ANCHOR 2026-07-20 — the line numbers below are STALE
+
+`nonblocking-radio` restructured this file after this spec was written. Step 1's
+`transmitFrame()` helper is now **`startSending()`** (async: it calls
+`startTransmit()` and returns; TX-done arrives as a DIO1 interrupt). Every line
+reference in the Findings section is therefore wrong. Verified current sites:
+
+| finding | was | **now** |
+|---|---|---|
+| F2, F4 (TX credited before transmit) | `.cpp:85`/`:207` | **`.cpp:193`**, before `startTransmit()` at `:197` |
+| F1, F3, F4 (RX gated on clean decode; unvalidated length) | `.cpp:141`/`:142` | **`.cpp:276`**, bounds check at `:278` |
+| consumer of the numbers | — | **`.cpp:170`** `getTxDelayMsec()` — utilisation drives the backoff |
+| storage | `.h` | **`.h:249`** `_txAirMs/_rxAirMs/_airWindowStart` |
+
+**Confirmed still live on 2026-07-20:** all four correctness findings F1–F4.
+
+**Field evidence that this matters:** DEV1 reports `channel_utilization` **9.4–19.7 %**
+on a channel measured at 15 frames per 6.5 min (Peter: under a dozen messages a day).
+The number is not merely cosmetic — `.cpp:170` feeds it into the contention window.
+
+### Exact changes (current code)
+
+**1. `.cpp:276` — F1 + F3: clamp BEFORE accounting, and count CRC failures**
+
+```diff
+-    int st = _radio->readData(raw, rawLen > sizeof(raw) ? sizeof(raw) : rawLen);
++    const size_t airLen = rawLen > sizeof(raw) ? sizeof(raw) : rawLen;
++    int st = _radio->readData(raw, airLen);
+     float rssi = _radio->getRSSI(), snr = _radio->getSNR();
+-    if (st == RADIOLIB_ERR_NONE && rawLen > 0)
+-        _rxAirMs += _radio->getTimeOnAir(rawLen) / 1000; // channel occupancy
++    if (airLen > 0)
++        _rxAirUs += _radio->getTimeOnAir(airLen);
+```
+
+**2. `.cpp:193` — F2: credit only once the transmit actually starts**
+
+```diff
+-    _txAirMs += _radio->getTimeOnAir(it.len) / 1000;
+     _rxActive = false;
+     ...
+     if (_radio->startTransmit(it.frame, it.len) != RADIOLIB_ERR_NONE) { ...drop... }
++    _txAirUs += _radio->getTimeOnAir(it.len);   // only now is it going on air
+```
+
+**3. `.h` — F4: accumulate microseconds, divide in the getters (public API unchanged)**
+
+```diff
+-    uint32_t airTxMs() const { return _txAirMs; }
+-    uint32_t airRxMs() const { return _rxAirMs; }
++    uint32_t airTxMs() const { return _txAirUs / 1000; }
++    uint32_t airRxMs() const { return _rxAirUs / 1000; }
+-    void resetAirWindow() { _txAirMs = 0; _rxAirMs = 0; _airWindowStart = millis(); }
++    void resetAirWindow() { _txAirUs = 0; _rxAirUs = 0; _airWindowStart = millis(); }
+-    uint32_t _txAirMs = 0, _rxAirMs = 0, _airWindowStart = 0;
++    uint32_t _txAirUs = 0, _rxAirUs = 0, _airWindowStart = 0;
+```
+
+**4. `.cpp:170`** — utilisation must use the same units:
+`100.0f * (float)(_txAirUs + _rxAirUs) / 1000.0f / (float)win`.
+
+`uint32_t` µs wraps at ~71 min of *accumulated airtime*; `resetAirWindow()` is called
+each telemetry interval, so a window holds seconds. Noted, not guarded.
+
 ## Findings
 
 Ordered by severity. F1–F4 are correctness; F5–F8 are cost and consistency.
+**NOTE: the line numbers in this section are pre-async — see the RE-ANCHOR above.**
 
 ### F1 — RX airtime skips CRC-failed frames (`.cpp:141`)
 

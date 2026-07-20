@@ -167,7 +167,10 @@ void MeshtasticTransport::armRx()
 uint32_t MeshtasticTransport::getTxDelayMsec()
 {
     uint32_t win = airWindowMs();
-    float util = win ? 100.0f * (float)(_txAirMs + _rxAirMs) / (float)win : 0.0f;
+    // _txAirUs/_rxAirUs are MICROSECONDS; win is ms. Divide by 1000 here rather than
+    // per packet, so this shares the corrected accounting instead of re-introducing
+    // the truncation bias it was just fixed for.
+    float util = win ? 100.0f * ((float)(_txAirUs + _rxAirUs) / 1000.0f) / (float)win : 0.0f;
     if (util > 100.0f) util = 100.0f;
     uint8_t cw = CWMIN + (uint8_t)((util * (CWMAX - CWMIN)) / 100.0f); // map 0..100 -> CWMIN..CWMAX
     uint32_t span = 1u << cw;                                         // pow_of_2(CWsize)
@@ -190,7 +193,6 @@ void MeshtasticTransport::startSending()
     // isActivelyReceiving guard that prevents it instead).
     if (_radio->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE)
         _rxDroppedByTx++;
-    _txAirMs += _radio->getTimeOnAir(it.len) / 1000;
     _rxActive = false;
     memcpy(_frame, it.frame, it.len); // introspection: the frame going on air
     _frameLen = it.len;
@@ -202,6 +204,11 @@ void MeshtasticTransport::startSending()
         armRx();
         return;
     }
+    // Credit airtime ONLY now. It used to be booked before startTransmit(), so a
+    // frame that never went out still inflated air_util_tx — the metric lied
+    // precisely when the radio was misbehaving, and a retry double-counted the same
+    // non-transmission.
+    _txAirUs += _radio->getTimeOnAir(it.len);
     _txState = TX_SENDING;
     _txStateMs = millis();
 }
@@ -270,10 +277,20 @@ void MeshtasticTransport::handleRxDone()
 {
     uint8_t raw[FRAME_CAP];
     size_t rawLen = _radio->getPacketLength();
-    int st = _radio->readData(raw, rawLen > sizeof(raw) ? sizeof(raw) : rawLen);
+    // Clamp BEFORE anything uses the length. getPacketLength() is attacker/noise
+    // controlled: a corrupt frame reporting 255 against a 253-byte buffer would
+    // otherwise book airtime from a bogus length one line before being rejected as
+    // oversized. The length must not be distrusted for parsing and trusted for
+    // arithmetic.
+    const size_t airLen = rawLen > sizeof(raw) ? sizeof(raw) : rawLen;
+    int st = _radio->readData(raw, airLen);
     float rssi = _radio->getRSSI(), snr = _radio->getSNR();
-    if (st == RADIOLIB_ERR_NONE && rawLen > 0)
-        _rxAirMs += _radio->getTimeOnAir(rawLen) / 1000; // channel occupancy
+    // Count occupancy for EVERY frame the radio decoded, including CRC failures.
+    // Occupancy is an RF-level fact: a colliding frame still used ~0.5 s of air at
+    // SF11. Gating this on a clean decode made channel_utilization read near zero in
+    // exactly the congested case the metric exists to detect.
+    if (airLen > 0)
+        _rxAirUs += _radio->getTimeOnAir(airLen);
     armRx();
     if (st != RADIOLIB_ERR_NONE || rawLen <= sizeof(PacketHeader) || rawLen > sizeof(raw))
         return;
