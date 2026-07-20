@@ -116,6 +116,16 @@ public:
     // now, so this actually means something (unlike the old blocking transmit()).
     bool busy() const { return _txState != TX_IDLE || _txCount > 0; }
 
+    // Meshtastic contention model (RadioInterface::getTxDelayMsec). NOT a delay():
+    // returns how many ms to SCHEDULE a transmit ahead — a random multiple of a
+    // slot time, drawn from a window whose size grows with channel utilisation.
+    // Every enqueue uses getTxDelayMsec() by default. getTxDelayMsecWeighted(snr)
+    // biases by the received SNR (used for replies). scheduleNextTxIn() overrides
+    // the scheduled delay for the NEXT enqueued frame only (reply + spaced resend).
+    uint32_t getTxDelayMsec();
+    uint32_t getTxDelayMsecWeighted(float snr);
+    void     scheduleNextTxIn(uint32_t ms) { _nextTxDelay = ms; _nextTxDelaySet = true; }
+
     // Radio only — CPU sleep is yours. Both return whether the radio
     // acknowledged; a caller that ignores the result is back to a silently
     // dead radio. wake() is the supported counterpart to sleep(): reaching
@@ -175,6 +185,13 @@ private:
 
     static const size_t MAX_PAYLOAD = 237; // MAX_LORA_PAYLOAD_LEN+1-16 (RadioInterface.h:66)
     static const size_t FRAME_CAP = sizeof(PacketHeader) + MAX_PAYLOAD;
+
+    // Contention-window bounds (MT RadioInterface.h) and the slot time computed
+    // from the region's SF/BW at begin(). Scheduled TX delays are multiples of it.
+    static const uint8_t CWMIN = 3, CWMAX = 8;
+    uint32_t _slotTimeMsec = 30;      // recomputed in begin() from SF/BW
+    uint32_t _nextTxDelay = 0;        // one-shot scheduled-delay override…
+    bool     _nextTxDelaySet = false; // …consumed by the next enqueueFrame()
     uint8_t _frame[FRAME_CAP];    // introspection: the most recently built frame
     size_t  _frameLen = 0;
 
@@ -223,7 +240,6 @@ private:
     bool enqueueFrame(const uint8_t *frame, size_t len); // copy into the TX ring
     void driveTx();               // advance the TX state machine (timing)
     void startSending();          // startTransmit() the head item (+ airtime accounting)
-    uint32_t backoffMs(uint8_t attempt);
 };
 
 } // namespace mt

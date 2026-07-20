@@ -45,6 +45,12 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
     radio.setDio2AsRfSwitch(true);
     radio.setCRC(RADIOLIB_SX126X_LORA_CRC_ON);
 
+    // Slot time for the contention model (MT computeSlotTimeMsec, SX126x form):
+    // ~2.5 CAD symbols + propagation/turnaround/MAC (0.2+0.4+7 ms). symbolTime =
+    // 2^SF / BW(kHz) ms. For SF11/BW250 → ~8.19 ms symbol → ~28 ms slot.
+    float symbolMs = (float)(1u << region.sf) / region.bwKHz;
+    _slotTimeMsec = (uint32_t)(2.5f * symbolMs + 7.6f);
+
     // Wire the DIO1 RX interrupt and arm RX now, so the radio listens
     // continuously and an inbound frame flags itself the instant it lands —
     // the app no longer has to be polling at the right moment to catch it.
@@ -117,10 +123,15 @@ bool MeshtasticTransport::enqueueFrame(const uint8_t *frame, size_t len)
 {
     if (len == 0 || len > FRAME_CAP || _txCount >= TXQ_N)
         return false;
+    // Scheduled (not blocking) send time: the one-shot override if the caller set
+    // one (replies use it for an SNR-weighted delay + a spaced resend), otherwise
+    // the utilisation-derived contention delay. Either way send() returns at once.
+    uint32_t after = _nextTxDelaySet ? _nextTxDelay : getTxDelayMsec();
+    _nextTxDelaySet = false;
     uint8_t tail = (_txHead + _txCount) % TXQ_N;
     memcpy(_txq[tail].frame, frame, len);
     _txq[tail].len = (uint16_t)len;
-    _txq[tail].txAfter = millis();
+    _txq[tail].txAfter = millis() + after;
     _txq[tail].attempts = 0;
     _txCount++;
     return true;
@@ -132,13 +143,32 @@ void MeshtasticTransport::armRx()
         _rxActive = true;
 }
 
-// Escalating randomized backoff. This is a RESCHEDULE (a millis() gate), not a
-// delay() — the CPU is never blocked. Mirrors the old window 60ms<<min(n,3)+jitter.
-// Step 4 replaces this with the channel-utilisation-derived getTxDelayMsec model.
-uint32_t MeshtasticTransport::backoffMs(uint8_t attempt)
+// MT RadioInterface::getTxDelayMsec — random multiple of a slot time from a
+// contention window sized by channel utilisation. Used to SCHEDULE every send;
+// it is a millis() offset, never a blocking delay(). Idle channel → small window
+// (snappy); busy channel → large window (back off). Channel utilisation is the
+// air-accounting ratio over the current window (app resets it periodically).
+uint32_t MeshtasticTransport::getTxDelayMsec()
 {
-    uint32_t window = 60u << (attempt < 3 ? attempt : 3);
-    return 30u + (_rng ? _rng() : 0) % window;
+    uint32_t win = airWindowMs();
+    float util = win ? 100.0f * (float)(_txAirMs + _rxAirMs) / (float)win : 0.0f;
+    if (util > 100.0f) util = 100.0f;
+    uint8_t cw = CWMIN + (uint8_t)((util * (CWMAX - CWMIN)) / 100.0f); // map 0..100 -> CWMIN..CWMAX
+    uint32_t span = 1u << cw;                                         // pow_of_2(CWsize)
+    return (_rng ? _rng() % span : 0) * _slotTimeMsec;
+}
+
+// MT RadioInterface::getTxDelayMsecWeighted (non-router branch) — SNR-weighted:
+// a strong link (high SNR) waits longer, yielding first to weaker/distant nodes.
+// Offset by 2*CWMAX slots so replies fall behind any router rebroadcast. Used for
+// command replies, where we know the received command's SNR.
+uint32_t MeshtasticTransport::getTxDelayMsecWeighted(float snr)
+{
+    if (snr < -20.0f) snr = -20.0f;
+    if (snr > 10.0f)  snr = 10.0f;
+    uint8_t cw = CWMIN + (uint8_t)(((snr + 20.0f) * (CWMAX - CWMIN)) / 30.0f); // map -20..10
+    uint32_t span = 1u << cw;
+    return (2u * CWMAX * _slotTimeMsec) + (_rng ? _rng() % span : 0) * _slotTimeMsec;
 }
 
 // Choke point for the actual transmit: airtime accounting + startTransmit. The
@@ -305,7 +335,7 @@ void MeshtasticTransport::service()
                 // retry the same frame later. Live listen with zero blocking.
                 _csmaDeferrals++;
                 _txq[_txHead].attempts++;
-                _txq[_txHead].txAfter = millis() + backoffMs(_txq[_txHead].attempts);
+                _txq[_txHead].txAfter = millis() + getTxDelayMsec(); // re-roll the window
                 _txState = TX_WAITING;
                 armRx();
             } else {
