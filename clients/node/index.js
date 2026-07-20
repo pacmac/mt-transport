@@ -40,6 +40,15 @@ class Client {
       throw new Error('channel must be given explicitly — it must never default to 0/PRIMARY');
     }
     this.channel = o.channel;
+    // Command routing. node-dash reshaped the message model (2026-07-20): the old
+    // POST /{gw}/messages path is now Primary/chat only. Command/response goes via
+    // POST /nodes/<num>/command, which builds "@<last4> <verb>" and resolves the
+    // Private channel by NAME server-side. In this mode _sendText posts the verb+
+    // args (the "@target " we prepend is stripped) to o.nodeNum; text replies land
+    // in node-dash's command_history, and chunk frames still arrive as binary
+    // port-261 private_app events on the same /events WS.
+    this.commandRoute = !!o.commandRoute;
+    this.nodeNum = o.nodeNum;
     this.store = new PayloadStore({ dir: o.payloadDir || './payloads' });
 
     this.events = new MeshEvents({ host: this.host });
@@ -68,7 +77,22 @@ class Client {
   // ---- outbound --------------------------------------------------------------
 
   async _sendText(text) {
-    // Belt and braces: the constructor rejects 0, but a caller mutating
+    if (this.commandRoute) {
+      if (this.nodeNum == null) throw new Error('commandRoute requires nodeNum');
+      // Strip the "@<target> " prefix our command builders add; node-dash re-adds
+      // "@<last4-of-num>" and resolves the Private channel by name — so PRIMARY is
+      // never reachable through this route (the server owns the channel).
+      const command = text.replace(/^@\S+\s+/, '');
+      const r = await fetch(`http://${this.host}/nodes/${this.nodeNum}/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      });
+      if (!r.ok) throw new Error(`command route failed: ${r.status}`);
+      return r.json();
+    }
+    // Legacy path — now Primary/chat on node-dash; kept for the raw mesh-gw route
+    // and tests. Belt and braces: the constructor rejects 0, but a caller mutating
     // .channel afterwards must not be able to reach PRIMARY either.
     if (!this.channel) throw new Error('refusing to send on channel 0 (PRIMARY)');
     const r = await fetch(`http://${this.host}/${this.gatewayId}/messages`, {
@@ -144,8 +168,12 @@ class Client {
         // here asked "describe whatever you hold", so a caller fetching pid 1
         // was handed pid 2's manifest and adopted it, reporting success. We
         // know the pid we want, so we must ask a question the device can refuse.
+        // noReply: the manifest is delivered as a BINARY frame on port 261, not a
+        // text reply. Waiting for text would stall until timeout — worse now that
+        // node-dash routes command replies to command_history, off our text path.
+        // The manifest loop re-requests until haveManifest is set from that frame.
         await this.queue.enqueue(
-          cmd.chunkInfo(t, frame.readUInt16BE(1)), { priority: 1, retries: 1 });
+          cmd.chunkInfo(t, frame.readUInt16BE(1)), { priority: 1, noReply: true });
       } else if (frame[0] === chunk.MSG.PULL) {
         // noReply: the device answers with chunks on port 261, not text.
         // dedupKey MUST include the pid: keyed on offset alone, a pull for
