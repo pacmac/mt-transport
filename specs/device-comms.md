@@ -71,10 +71,15 @@ curl -s -X POST http://localhost:8000/!2687afb1/messages \
 # → {"id": <packetId>, …}
 ```
 
-**Command grammar** (full grammar in `docs/rx-and-commands.md`): `@<target> <verb> [args]`,
-broadcast as a TEXT_MESSAGE_APP text on channel 2 (2.8 rejects PSK DMs — "legacy DM",
-so commands go as broadcast text, not DMs). `<target>` matches a unit by the **last
-4 hex of its node number** OR its short name. Known units:
+**Command grammar** (full grammar in `docs/rx-and-commands.md`; parser at
+`pac-garage-alarm/src/main.cpp:992`): `@<target> <verb> [args]`, broadcast as a
+TEXT_MESSAGE_APP text on channel 2 (2.8 rejects PSK DMs — "legacy DM", so commands
+go as broadcast text, not DMs). The device splits on the **first space**: the token
+after `@` is the target, and the very next token MUST be the verb. **Nothing may
+sit between the target and the verb** — `@336b 08:55 status` parses `08:55` as the
+verb and is rejected (`{"type":"err","msg":"unknown cmd"}`). It is `@336b status`,
+full stop. `<target>` matches a unit by the **last 4 hex of its node number** OR its
+short name (`*` = all units). Known units:
 
 | unit | node id | suffix (target) | short name | notes |
 |---|---|---|---|---|
@@ -83,7 +88,11 @@ so commands go as broadcast text, not DMs). `<target>` matches a unit by the **l
 
 Suffix is `nodeNum & 0xFFFF` as 4 hex — for `!987ab80f` that is **`b80f`**, not `80f`.
 
-Tag test sends with a HH:MM stamp so they're identifiable (memory `timestamp-test-messages`).
+The HH:MM-tag convention (memory `timestamp-test-messages`) is for **plain-text**
+test sends only — so you can spot them in the phone/node-dash message list. NEVER
+put it in a command: a command has no free-text tag, and any extra token breaks the
+target→verb parse (see above). To identify a command's reply, correlate on
+`reply_id` (it echoes your command's `packet_id`), not on a tag.
 
 ## Read the reply
 
