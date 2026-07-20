@@ -44,6 +44,12 @@ const REPAIR_IDS_MAX = Math.floor((MESH_PAYLOAD_MAX - REPAIR_HEADER_LEN) / 2); /
 // to request it, so the device re-sends it on this cadence. See MtChunkPush.h.
 const MANIFEST_REPEAT_EVERY = 8;
 
+// Wire protocol version — MUST match MtChunkPush.h PUSH_PROTO_VERSION. Bump on
+// any change to frame layout or to what a verb answers with. Rides the existing
+// `push stat` reply, so checking it costs no extra airtime. See the header for
+// the near-miss that motivated it (silent verbs -> a hang, not an error).
+const PROTO_VERSION = 1;
+
 // A fresh 0x10 block, clear of mt-chunk's 0x01-0x06. Both ride port 261, so a
 // frame from the wrong protocol must be unmistakable rather than silently
 // misparsed as a plausible pull.
@@ -205,6 +211,7 @@ function decodeFrame(buf) {
 }
 
 module.exports = {
+  PROTO_VERSION,
   MESH_PAYLOAD_MAX, PUSH_CHUNK_HEADER_LEN, CHUNK_DATA_MAX,
   REPAIR_HEADER_LEN, REPAIR_IDS_MAX, MANIFEST_REPEAT_EVERY,
   MSG, PT, UP, crc32,

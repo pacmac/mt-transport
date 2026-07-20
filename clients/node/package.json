@@ -1,6 +1,6 @@
 {
   "name": "mt-transport",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "Node client for the PAC private Meshtastic protocol: chunked payload transfer, message queue, on-demand pull, config and commands. Everything the alarm carries that stock Meshtastic does not.",
   "main": "index.js",
   "scripts": {
@@ -13,5 +13,9 @@
   "engines": {
     "node": ">=20.12.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "mtTransport": {
+    "pushProtoVersion": 1,
+    "note": "pushProtoVersion MUST match mtchunkpush::PUSH_PROTO_VERSION in mylibs/mt-chunk-push/src/MtChunkPush.h and PROTO_VERSION in lib/chunk-push.js. node-dash loads this module by PATH (MT_TRANSPORT_PATH), not as a versioned dependency, so this field is currently the only way to answer \"which client is running?\"."
+  }
 }

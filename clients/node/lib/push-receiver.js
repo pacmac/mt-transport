@@ -67,7 +67,12 @@ class PushReceiver {
    *                      taking four minutes to notice a dead one, so the bound
    *                      is deliberately loose.
    */
-  constructor(pid, { idleMs = 8000, maxStale = 8, maxUnanswered = 30 } = {}) {
+  constructor(pid, { idleMs = 8000, maxStale = 8, maxUnanswered = 30,
+                     actMs = 4000 } = {}) {
+    // actMs: spacing once the DEVICE has told us where it is. The long idleMs is
+    // for detecting silence we cannot otherwise explain; it must not also gate
+    // the actions we take after the answer arrives.
+    this.actMs = actMs;
     this.maxUnanswered = maxUnanswered;
     this.unanswered = 0;
     this.pid = pid;
@@ -156,8 +161,18 @@ class PushReceiver {
 
     // Not idle yet — the device is streaming. Do nothing at all. Interrupting
     // here is exactly the mistake pull made on every batch.
-    if (nowMs - this.lastRxMs < this.idleMs) return null;
-    if (nowMs - this.lastTxMs < this.idleMs) return null;
+    //
+    // BUT once the device has SAID it finished its pass (or we already hold
+    // everything), we are no longer guessing, so the long timer must not apply.
+    // It previously did, and each tail step cost a FULL idle period — query,
+    // repair and complete = 3 x 35 s = 105 s of dead time. Measured consequence:
+    // a transfer missing ONE chunk sat at 31/32 and overran a 240 s deadline.
+    // The idle timer detects unexplained silence; it must not delay the action
+    // that the answer already justified.
+    const known = this.manifest && (this.progressDone || this.missing().length === 0);
+    const gate = known ? this.actMs : this.idleMs;
+    if (nowMs - this.lastRxMs < gate) return null;
+    if (nowMs - this.lastTxMs < gate) return null;
 
     this.lastTxMs = nowMs;
 

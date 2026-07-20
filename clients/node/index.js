@@ -15,6 +15,9 @@ const { parse260, parseAdverts } = require('./lib/payloads');
 const { cmd, target, UNSAFE_TO_RETRY } = require('./lib/commands');
 const chunk = require('./lib/chunk');
 const push = require('./lib/chunk-push');
+// Answerable at runtime: node-dash loads this module by PATH, so "which client
+// is running?" otherwise has no answer. See package.json mtTransport.
+const CLIENT_VERSION = require('./package.json').version;
 const { PushReceiver } = require('./lib/push-receiver');
 
 const PORT_ALARM = 260; // JSON: debug, config, adverts
@@ -216,8 +219,32 @@ class Client {
       let adopt = false;
       try {
         const st = await this.command(t, 'pushStat');
+
+        // PROTOCOL VERSION CHECK — free, because we are already asking.
+        // Without it a wire change shows up as a HANG, not an error: 260720-11
+        // made `push q`/`push rep` stop sending text acks, and a peer still
+        // waiting for those would simply never complete. Fail loudly instead.
+        if (st && st.proto !== undefined && st.proto !== push.PROTO_VERSION) {
+          throw new Error(
+            `push ${pid}: protocol mismatch — device speaks v${st.proto} (fw ${st.fw}), ` +
+            `this client speaks v${push.PROTO_VERSION}. Refusing rather than hanging.`);
+        }
+
+        // FAIL FAST when the device holds nothing. After a successful transfer
+        // it releases the buffer (correct — only the receiver can say a transfer
+        // is done), so a START is REFUSED, not lost. That refusal previously
+        // looked like a dead device and cost a real debugging session.
+        if (st && st.upst === 0) {
+          throw new Error(
+            `push ${pid}: device has no payload published (upst=0, badStarts=${st.bs}). ` +
+            `It will not send pid ${pid} — publish it first.`);
+        }
         if (st && (st.upst === 2 || st.upst === 3) && st.up === pid) adopt = true;
-      } catch (_) { /* no stat: fall through and START normally */ }
+      } catch (e) {
+        // A mismatch or an empty device is a REAL failure — do not swallow it.
+        if (/protocol mismatch|no payload published/.test(e.message)) throw e;
+        /* otherwise: no stat reply — fall through and START normally */
+      }
 
       if (!adopt) await emit(push.encodeStart(pid));
 
@@ -412,4 +439,5 @@ class Client {
 
 module.exports = { Client, chunk, cmd, target, parse260, parseAdverts,
                    PayloadStore, CommandQueue, MeshEvents,
-                   PORT_ALARM, PORT_CHUNK };
+                   PORT_ALARM, PORT_CHUNK, CLIENT_VERSION,
+                   PUSH_PROTO_VERSION: push.PROTO_VERSION };
