@@ -180,6 +180,7 @@ void MeshtasticTransport::startSending()
     _frameLen = it.len;
     if (_radio->startTransmit(it.frame, it.len) != RADIOLIB_ERR_NONE) {
         _txFailStreak++;
+        _txDropped++; // queued, never went out — otherwise invisible to the caller
         _txCount--; _txHead = (_txHead + 1) % TXQ_N; // drop the unsendable frame
         _txState = TX_IDLE;
         armRx();
@@ -226,6 +227,7 @@ void MeshtasticTransport::driveTx()
         if ((int32_t)(now - _txStateMs) > 5000) {
             _radio->finishTransmit();
             _txFailStreak++;
+            _txDropped++; // TX-done never arrived; the frame is abandoned here
             _txCount--; _txHead = (_txHead + 1) % TXQ_N;
             _txState = TX_IDLE;
             armRx();

@@ -149,6 +149,15 @@ public:
     // and a healthy radio still returns ERR_NONE and clears the count.
     uint32_t txFailStreak() const { return _txFailStreak; }
 
+    // CUMULATIVE frames discarded by the TX state machine after send() already
+    // returned true — startTransmit() errored, or TX-done never arrived. NEVER
+    // reset, which is the whole point: txFailStreak() above is a STREAK zeroed by
+    // the next success, so it is blind to INTERMITTENT loss. send() reports success
+    // at ENQUEUE, so without this number a frame that was queued and never went out
+    // is invisible to the application — and "the device transmitted it" becomes an
+    // unfounded claim. This is the only counter that can contradict it.
+    uint32_t txDropped() const { return _txDropped; }
+
     // DEBUG/TEST ONLY. Forces the streak so a node can prove its own watchdog
     // gate without a genuinely broken radio. Never called in normal operation;
     // any successful transmit clears it again.
@@ -235,6 +244,7 @@ private:
     uint8_t  _seenIdx = 0;
     uint32_t _csmaDeferrals = 0;
     uint32_t _txFailStreak = 0;
+    uint32_t _txDropped = 0;
     uint32_t _rxDroppedByTx = 0;
     uint32_t _txAirMs = 0, _rxAirMs = 0, _airWindowStart = 0;
 
