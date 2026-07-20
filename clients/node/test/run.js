@@ -89,6 +89,17 @@ t('chunk codec round-trips a pull frame', () => {
   assert.strictEqual(d.crc >>> 0, 0x65FBD5D9);
 });
 
+t('chunk codec decodes a BUSY (device-driven retry-after) frame', () => {
+  // [type][pid:2][retry_after_ms:2] — device tells the client when to re-pull.
+  // Must stay byte-compatible with MtChunk.h MSG_BUSY (0x06).
+  const d = chunk.decodeFrame(Buffer.from([0x06, 0x00, 0x2a, 0x1f, 0x40]));
+  assert.strictEqual(d.type, chunk.MSG.BUSY);
+  assert.strictEqual(d.pid, 42);
+  assert.strictEqual(d.retryAfterMs, 8000); // 0x1f40
+  // A truncated BUSY frame must be rejected, not half-read.
+  assert.strictEqual(chunk.decodeFrame(Buffer.from([0x06, 0x00, 0x2a])), null);
+});
+
 t('crc32 matches the value agreed by device, camera and python', () => {
   const fs = require('fs');
   // Resolve from __dirname, NOT the cwd. This path used to be cwd-relative, so

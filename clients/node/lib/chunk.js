@@ -26,7 +26,7 @@ const CHUNK_HEADER_LEN = 7;
 const CHUNK_DATA_MAX   = MESH_PAYLOAD_MAX - CHUNK_HEADER_LEN; // 224
 const PULL_BATCH_MAX   = 16;
 
-const MSG = { CHUNK: 0x01, PULL: 0x02, MANIFEST: 0x03, ERR: 0x04, GETMANIFEST: 0x05 };
+const MSG = { CHUNK: 0x01, PULL: 0x02, MANIFEST: 0x03, ERR: 0x04, GETMANIFEST: 0x05, BUSY: 0x06 };
 const PT  = { SCHEMA: 1, IMAGE: 2, LOG: 3 };
 const ERR = { GONE: 1, BADRANGE: 2, NOSUCH: 3 };
 
@@ -60,6 +60,12 @@ function decodeFrame(buf) {
   if (type === MSG.ERR) {
     if (buf.length < 4) return null;
     return { type, pid: buf.readUInt16BE(1), code: buf[3] };
+  }
+  if (type === MSG.BUSY) {
+    // Device-driven flow control: "not ready — retry this range after N ms."
+    // [type][pid:2][retry_after_ms:2]. Kept byte-compatible with MtChunk.h MSG_BUSY.
+    if (buf.length < 5) return null;
+    return { type, pid: buf.readUInt16BE(1), retryAfterMs: buf.readUInt16BE(3) };
   }
   return { type };
 }
