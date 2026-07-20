@@ -1,7 +1,7 @@
 ---
 task: airtime-accounting-fixes
-status: F1-F4 implemented 2026-07-20 (260720-6). F7 REOPENED — see below.
-source_hash:  # F1-F4 (steps 2-5) landed; F7 reopened by measurement; step 6 outstanding
+status: F1-F4 implemented 2026-07-20 (260720-6). F7 reopening RETRACTED — see below.
+source_hash:  # F1-F4 (steps 2-5) landed; F7 UNPROVEN (my evidence was invalid); step 6 outstanding
   src/MeshtasticTransport.cpp: 6257cbcbaf5535f274280c6858106bf9d4e2df40aedc425e3df2733d160221ef
   src/MeshtasticTransport.h: c15d910cecb57150815e3a076045cc1294215b129231a66d4843b9ed087af200
 updated: 2026-07-20
@@ -35,6 +35,33 @@ they return change.
 **NOT changing:** `pac-garage-alarm` — no API change, inherits by rebuild.
 Wire format untouched. `docs/wire-format.md`, `docs/rx-and-commands.md`
 unaffected.
+
+## RETRACTION 2026-07-20 — my F7 "reopening" evidence was invalid
+
+Commit 54bf886's message claims a quiet-window measurement showed
+`air_util_tx = 58%` and therefore reopened F7. **That measurement was wrong and the
+conclusion does not stand.** Recorded here because the claim is already in git
+history and must not be inherited as fact.
+
+The listener filtered events with `JSON.stringify(event).includes("<bench num>")`
+then regexed the **first** `air_util_tx` out of the whole blob. Dumping raw events
+afterwards showed the frames carrying `air_util_tx` are `device_data` events for the
+**BLE-connected gateways** (`!2687afb1` OMNI, `!fa39f7b4`) — neither even mentions
+the bench. The figures were almost certainly **OMNI's**, and a relay that
+rebroadcasts everything having high `air_util_tx` is expected, not a defect.
+
+The stated mechanism was wrong too: `sendDeviceMetrics()` has exactly two call sites
+(`main.cpp:1938` sleep-cycle, `main.cpp:2000` awake-loop) and they are **mutually
+exclusive** on `sleepMode`, so the "two reads one second apart" story cannot hold.
+
+**Still true on inspection, still unproven by measurement:** `main.cpp:717-728` reads
+`airWindowMs()`, computes the ratio, then calls `resetAirWindow()` — so the
+denominator is "time since the last read" and the library does push windowing onto
+every caller. A design smell worth addressing, but F7's original
+"document, do not implement" decision stands **unrefuted**.
+
+To settle it properly: match on the scalar `from_num == <bench>` of a TELEMETRY_APP
+packet originating at the bench — never a substring match on a bulk blob.
 
 ## RE-ANCHOR 2026-07-20 — the line numbers below are STALE
 
