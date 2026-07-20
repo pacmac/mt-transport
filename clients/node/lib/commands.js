@@ -28,6 +28,10 @@ const cmd = {
   // know a pid. Passing one makes it a VALIDATED query the device will refuse
   // with GONE/NOSUCH rather than silently answering about a different payload.
   // A caller that KNOWS the pid must always pass it; see index.js fetch().
+  // Push control. `pushStat` is the only one a caller issues directly — the rest
+  // are emitted by Client.push() from the receiver's own decisions.
+  pushStat: (t) => `@${t} push stat`,
+  pushPub:  (t, pid) => `@${t} push pub${pid === undefined ? '' : ' ' + pid}`,
   chunkInfo: (t, pid) => (pid === undefined
     ? `@${target(t)} chunk info`
     : `@${target(t)} chunk info ${pid | 0}`),

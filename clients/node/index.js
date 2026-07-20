@@ -14,6 +14,8 @@ const { PayloadStore } = require('./lib/store');
 const { parse260, parseAdverts } = require('./lib/payloads');
 const { cmd, target, UNSAFE_TO_RETRY } = require('./lib/commands');
 const chunk = require('./lib/chunk');
+const push = require('./lib/chunk-push');
+const { PushReceiver } = require('./lib/push-receiver');
 
 const PORT_ALARM = 260; // JSON: debug, config, adverts
 const PORT_CHUNK = 261; // binary: chunked payloads
@@ -60,7 +62,8 @@ class Client {
 
     this.latest = new Map();   // node_id -> last parsed 260 payload
     this.adverts = new Map();  // node_id -> [{pid, ptype, bytes, chunks}]
-    this._fetches = new Map(); // pid -> ChunkClient
+    this._fetches = new Map(); // pid -> ChunkClient  (pull)
+    this._pushes = new Map();  // pid -> PushReceiver (push)
 
     this.events.on(`port:${PORT_ALARM}`, (buf, e) => this._on260(buf, e));
     this.events.on(`port:${PORT_CHUNK}`, (buf) => this._onChunk(buf));
@@ -139,7 +142,115 @@ class Client {
   }
 
   _onChunk(buf) {
+    // Two protocols share port 261 with disjoint type blocks (pull 0x01-0x06,
+    // push 0x10-0x16), so the first byte decides. A frame from the wrong one is
+    // dropped by that protocol's decoder rather than misparsed.
+    if (buf.length >= 1 && buf[0] >= 0x10 && buf[0] <= 0x16) {
+      const now = Date.now();
+      for (const r of this._pushes.values()) r.onFrame(buf, now);
+      return;
+    }
     for (const c of this._fetches.values()) c.onFrame(buf);
+  }
+
+
+  // ---- push transfer ---------------------------------------------------------
+
+  /**
+   * Fetch a payload by PUSH: the device streams at its own rate and we listen
+   * passively, reconciling only at the end.
+   *
+   * WHY THIS EXISTS. fetch() (pull) puts a REQUEST on the critical path of every
+   * batch, and a lost request stalls the transfer permanently — measured on air
+   * as "stalled at 16/32, no serve, no busy", where the device's own UART showed
+   * it was never asked for chunk 16. Push removes that path: 4/4 CRC-verified
+   * transfers of the same payload over the same radio.
+   *
+   * Control travels as TEXT commands because mesh-gw sends no raw portnums —
+   * the same reason pull requests are text. Chunks come back binary on 261.
+   *
+   * Resolves with verified bytes. Never returns a partial: a plausible-but-wrong
+   * image is worse than no image.
+   */
+  async push(t, pid, { onProgress, deadlineMs, payloadDir, signal,
+                       idleMs = 35000, pollMs = 1000 } = {}) {
+    if (this._pushes.has(pid)) throw new Error(`push ${pid}: already in flight`);
+
+    const rx = new PushReceiver(pid, { idleMs });
+    this._pushes.set(pid, rx);
+    const t0 = Date.now();
+    const deadline = deadlineMs ? t0 + deadlineMs : t0 + 600000;
+    const partPath = payloadDir
+      ? require('path').join(payloadDir, `pid-${pid}.jpg.part`) : null;
+    let lastPrefix = -1;
+
+    // Translate a protocol frame into the text command that carries it.
+    const emit = async (buf) => {
+      const f = push.decodeFrame(buf);
+      if (!f) return;
+      if (f.type === push.MSG.START)      return this._sendText(`@${t} push ${f.pid}`);
+      if (f.type === push.MSG.PROGRESS_Q) return this._sendText(`@${t} push q ${f.pid}`);
+      if (f.type === push.MSG.REPAIR)     return this._sendText(`@${t} push rep ${f.pid} ${f.ids.join(',')}`);
+      if (f.type === push.MSG.COMPLETE)   return this._sendText(`@${t} push done ${f.pid} ${f.crc}`);
+    };
+
+    // Write-through partial, so a browser can render the contiguous prefix as it
+    // grows. NOTE for whoever builds UI on this: the prefix stalls at the FIRST
+    // gap and then jumps when repair fills it — at ~17% loss that is typically
+    // ~6% then 100%. The numeric bar is the honest progress indicator.
+    const writePart = () => {
+      if (!partPath) return;
+      let k = 0;
+      while (rx.chunks.has(k)) k++;
+      if (k === 0 || k === lastPrefix) return;
+      lastPrefix = k;
+      const parts = [];
+      for (let i = 0; i < k; i++) parts.push(rx.chunks.get(i));
+      try { require('fs').writeFileSync(partPath, Buffer.concat(parts)); } catch (_) {}
+    };
+
+    try {
+      // ADOPT rather than restart when the device is already serving this pid.
+      // upst=3 (sent everything, holding) is the valuable case: one query plus a
+      // repair round instead of re-streaming the whole payload. That is a resume.
+      let adopt = false;
+      try {
+        const st = await this.command(t, 'pushStat');
+        if (st && (st.upst === 2 || st.upst === 3) && st.up === pid) adopt = true;
+      } catch (_) { /* no stat: fall through and START normally */ }
+
+      if (!adopt) await emit(push.encodeStart(pid));
+
+      while (Date.now() < deadline) {
+        if (signal && signal.aborted) throw new Error(`push ${pid}: aborted`);
+        await new Promise((r) => setTimeout(r, pollMs));
+
+        // ABSOLUTE clock, matching _onChunk's rx.onFrame(buf, Date.now()).
+        // These were different time bases: onFrame stamped epoch ms while tick
+        // received elapsed ms, so (now - lastRx) was hugely negative, the idle
+        // check never tripped, and tick() never issued a single query, repair or
+        // complete. The transfer sat at 24/32 until the deadline. Only shows up
+        // once the loop lives in the client — a standalone script uses one clock.
+        const out = rx.tick(Date.now());
+        if (out) await emit(out);
+
+        writePart();
+        if (onProgress) onProgress({ received: rx.received, count: rx.count,
+                                     elapsedMs: Date.now() - t0 });
+
+        if (rx.failed) throw new Error(`push ${pid}: ${rx.failed}`);
+        if (rx.done) {
+          const buf = rx.assemble();
+          if (!buf) throw new Error(`push ${pid}: complete but CRC failed`);
+          if (partPath) { try { require('fs').unlinkSync(partPath); } catch (_) {} }
+          return buf;
+        }
+      }
+      throw new Error(
+        `push ${pid}: deadline at ${rx.received}/${rx.count}`);
+    } finally {
+      this._pushes.delete(pid);
+    }
   }
 
   // ---- chunked payload fetch -------------------------------------------------
