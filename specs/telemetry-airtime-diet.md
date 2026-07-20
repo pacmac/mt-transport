@@ -60,14 +60,14 @@ Because there is **no OTA**, "add it later" costs a site visit — so it went in
 deployment rather than after. Settings **v6** (migrated from v5, verified preserving
 the deployed unit's tuning).
 
--  gates on **battery** only — uptime and air_util change every
+- `sendDeviceMetrics()` gates on **battery** only — uptime and air_util change every
   beat by definition and would defeat the gate.
--  gates on temp (±0.5 °C) / humidity (±2 %RH).
--  gates on consumed mAh (±5).
-- **Keepalive floor** (, default 6 h): a frame silent that long is
+- `sendEnvMetrics()` gates on temp (±0.5 °C) / humidity (±2 %RH).
+- `broadcastCalc()` gates on consumed mAh (±5).
+- **Keepalive floor** (`teleKeepaliveMs`, default 6 h): a frame silent that long is
   sent regardless, so silence stays diagnostic — without it "nothing changed" and
   "the unit is dead" are indistinguishable.
-- **** — persisted.  is the
+- **`telemetry [<onchange 0|1> [<keepalive_min>]]`** — persisted. `onchange 0` is the
   **safety valve**: reverts to sending every beat if the gate misbehaves in the
   field. Persisted precisely so a reboot cannot silently re-enable a bad gate.
 
@@ -80,8 +80,8 @@ Deadbands are compile-time: sensor-physics constants, not operational tuning, an
 every extra remote knob is another thing that can be set wrong on an unreachable
 unit.
 
-Also unchanged: `broadcastCalc()` (~35 B, and only sent when a coulomb counter is
-fitted), and alarm/detection paths — those are event-driven and must stay immediate.
+Unchanged: alarm/detection paths — those are event-driven and must stay immediate.
+A change-gate there would be a safety defect, not an optimisation.
 
 ## Safety note
 
