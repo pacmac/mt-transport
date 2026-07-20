@@ -126,6 +126,31 @@ RadioLib's own re-apply path.
   actually evidenced.
 - `pac-garage-alarm` — inherits by rebuild, no API change.
 
+## Addendum 2026-07-20 — read the settings BACK (Peter)
+
+*"do we query the rx gain and other 8xx fix and include that in the debug packet?"*
+
+We did not, and that was the wrong gap to leave: **a silent clear is the documented
+failure mode.** Upstream re-applies `0x8B5` every 60 s precisely because
+`CALIBRATE_ALL` wipes bit 0 without any indication. Setting a register at boot and
+never reading it is faith, not verification — and the unit has no OTA.
+
+Both are readable from the firmware because it owns the `Module`
+(`Module::SPIgetRegValue()` is **public**, unlike `SX126x::readRegister()`):
+
+```c
+rxg  = g_radioMod.SPIgetRegValue(0x08AC);       // 0x96 = BOOSTED, 0x94 = power saving
+p8b5 = g_radioMod.SPIgetRegValue(0x8B5, 0, 0);  // 1 = sensitivity patch applied
+```
+
+Added to the DEBUG frame as `"rxg"` (raw byte, so an unexpected third value is
+visible rather than coerced to a boolean) and `"p8b5"`. The frame is **on demand**
+now, so the two SPI reads cost nothing periodically.
+
+This makes the RX-parity work *checkable in the field*: if a future change ever
+introduces a periodic calibration, `p8b5` drops to 0 and we see it instead of
+guessing at a sensitivity regression.
+
 ## Verify
 
 1. **Static** — `setRxBoostedGainMode(true)` present in `begin()` and `wake()`.

@@ -1,7 +1,9 @@
 ---
 task: status-reply-overflow
-status: active — 2026-07-20
+status: implemented 2026-07-20 (260720-3, flashed + verified on air)
 priority: HIGH — silent, deployment-critical, unfixable in the field (no OTA)
+source_hash:
+  projects/pac-garage-alarm/src/main.cpp: 95704964923ec685b8fcfc352eb3085db02745ad6e3bce522314b3f5c69ace5b
 scope:
   - projects/pac-garage-alarm/src/main.cpp
 ---
