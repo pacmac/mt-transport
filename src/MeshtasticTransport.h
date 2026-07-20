@@ -74,10 +74,20 @@ public:
               uint32_t to = BROADCAST_ADDR, uint8_t hopLimit = 3,
               uint32_t requestId = 0, uint32_t replyId = 0);
 
-    // Bounded listen (the Class-A window; an always-awake app just calls it
-    // in a loop). True when a packet on OUR channel, addressed to us or
-    // broadcast, decrypts, decodes and is not a recent duplicate. Frames
-    // failing any filter are dropped and the wait continues to the deadline.
+    // Non-blocking RX service. Reads and delivers AT MOST one packet, then
+    // returns immediately — no delay(), no spin. An always-awake app calls this
+    // once per loop() pass; the radio stays armed continuously and a DIO1 IRQ
+    // flags an inbound frame the instant it lands, so liveness no longer depends
+    // on how often (or how slowly) the caller polls. True on a packet that
+    // passed every filter; false when nothing was ready OR a frame arrived but
+    // failed a filter (channel/addr/dup/decrypt) — call again to keep draining.
+    bool poll(RxPacket &out);
+
+    // Bounded listen (the Class-A window; a sleep-cycle RX window calls it).
+    // Loops poll() until a good packet lands or timeoutMs elapses. True when a
+    // packet on OUR channel, addressed to us or broadcast, decrypts, decodes and
+    // is not a recent duplicate. Frames failing any filter are dropped and the
+    // wait continues to the deadline. The awake loop should prefer poll().
     bool receive(uint32_t timeoutMs, RxPacket &out);
 
     // Protocol ACK: Routing{error_reason=NONE} on ROUTING_APP with
@@ -156,6 +166,16 @@ private:
     size_t  _frameLen = 0;
 
     bool _rxActive = false;       // radio currently in RX (survives short polls)
+
+    // DIO1 RX interrupt. RadioLib's setDio1Action takes a plain void(*)(void),
+    // so the handler is a static trampoline that flags the one live instance —
+    // this app has a single radio. The ISR does NOTHING but set the flag (no
+    // SPI, no library calls): the actual readData() happens in poll(), on the
+    // main context. _rxReady is volatile because the ISR and poll() race on it.
+    static MeshtasticTransport *_isrTarget;
+    static void _onDio1Rx();
+    volatile bool _rxReady = false;
+
     uint64_t _seen[8] = {0};      // (from<<32|id) dedupe ring
     uint8_t  _seenIdx = 0;
     uint32_t _csmaDeferrals = 0;

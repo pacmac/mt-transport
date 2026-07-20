@@ -13,6 +13,15 @@ namespace mt {
 
 const RegionParams EU868_LONG_FAST = {869.525f, 250.0f, 11, 5, 0x2b, 16};
 
+// RX interrupt trampoline. setDio1Action wants a bare function pointer, so the
+// ISR flags the one live instance. Set in begin(); this app runs a single radio.
+MeshtasticTransport *MeshtasticTransport::_isrTarget = nullptr;
+void MeshtasticTransport::_onDio1Rx()
+{
+    if (_isrTarget)
+        _isrTarget->_rxReady = true; // nothing else in the ISR — no SPI, no calls
+}
+
 bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
                                 const MeshChannel &ch, uint32_t nodeNum,
                                 uint32_t (*rng)(), int8_t txDbm)
@@ -35,6 +44,16 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
     radio.setCurrentLimit(140.0f);
     radio.setDio2AsRfSwitch(true);
     radio.setCRC(RADIOLIB_SX126X_LORA_CRC_ON);
+
+    // Wire the DIO1 RX interrupt and arm RX now, so the radio listens
+    // continuously and an inbound frame flags itself the instant it lands —
+    // the app no longer has to be polling at the right moment to catch it.
+    // startReceive re-maps DIO1 to RxDone and clears stale IRQ flags, so the
+    // first real frame is a clean edge. wake() re-arms after sleep.
+    _isrTarget = this;
+    radio.setDio1Action(_onDio1Rx);
+    if (radio.startReceive() == RADIOLIB_ERR_NONE)
+        _rxActive = true;
     return true;
 }
 
@@ -161,72 +180,91 @@ bool MeshtasticTransport::isDuplicate(uint32_t from, uint32_t id)
     return false;
 }
 
-bool MeshtasticTransport::receive(uint32_t timeoutMs, RxPacket &out)
+bool MeshtasticTransport::poll(RxPacket &out)
 {
     if (!_radio)
         return false;
 
+    // Keep the radio armed. Normally begin()/the last transmit left it in RX;
+    // this covers a cold first call or a path that dropped RX.
     if (!_rxActive) {
         if (_radio->startReceive() != RADIOLIB_ERR_NONE)
             return false;
         _rxActive = true;
     }
 
+    // Fast idle path: the DIO1 ISR sets _rxReady on RxDone. Only when it is not
+    // set do we pay an SPI getIrqFlags() read — proven-safe ground truth that
+    // also catches a frame that completed as RX was (re)armed. Either way,
+    // nothing is read from the radio until a frame is actually present.
+    if (!_rxReady && !(_radio->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE))
+        return false;
+    _rxReady = false;
+
+    // A frame arrived: read it, then re-arm RX immediately — a filter reject
+    // must not blind us until the next call.
+    uint8_t raw[sizeof(PacketHeader) + MAX_PAYLOAD];
+    size_t rawLen = _radio->getPacketLength();
+    int st = _radio->readData(raw, rawLen > sizeof(raw) ? sizeof(raw) : rawLen);
+    float rssi = _radio->getRSSI(), snr = _radio->getSNR();
+    if (st == RADIOLIB_ERR_NONE && rawLen > 0)
+        _rxAirMs += _radio->getTimeOnAir(rawLen) / 1000; // channel occupancy
+    _radio->startReceive();
+    if (st != RADIOLIB_ERR_NONE || rawLen <= sizeof(PacketHeader) ||
+        rawLen > sizeof(raw))
+        return false;
+
+    PacketHeader h;
+    memcpy(&h, raw, sizeof(h));
+    if (h.channel != _hash)
+        return false; // not our channel
+    if (h.from == _nodeNum)
+        return false; // our own packet relayed back to us (rebroadcast peers)
+    if (h.to != _nodeNum && h.to != BROADCAST_ADDR)
+        return false; // not for us
+
+    uint8_t plain[MAX_PAYLOAD];
+    size_t plainLen = rawLen - sizeof(PacketHeader);
+    if (!ctrCrypt(_ch.psk, _ch.pskLen, h.id, h.from, raw + sizeof(h),
+                  plain, plainLen))
+        return false;
+
+    meshtastic_Data data = meshtastic_Data_init_zero;
+    pb_istream_t is = pb_istream_from_buffer(plain, plainLen);
+    if (!pb_decode(&is, meshtastic_Data_fields, &data))
+        return false; // wrong PSK garbage decodes to noise; protobuf catches it
+
+    if (isDuplicate(h.from, h.id))
+        return false; // ReliableRouter retries land here
+
+    out.from = h.from;
+    out.to = h.to;
+    out.id = h.id;
+    out.portnum = data.portnum;
+    out.requestId = data.request_id;
+    out.hopLimit = h.flags & 0x07;
+    out.wantAck = h.flags & 0x08;
+    out.rssi = rssi;
+    out.snr = snr;
+    out.payloadLen = data.payload.size;
+    memcpy(out.payload, data.payload.bytes, data.payload.size);
+    return true;
+}
+
+// Bounded blocking listen, built on poll(). This is the SLEEP-window listener
+// (sleepCycle); the always-awake loop() calls poll() directly and never blocks
+// here. The delay(2) yield is confined to this sleep-adjacent path — it is not
+// in the awake message path the nonblocking-radio task is clearing.
+bool MeshtasticTransport::receive(uint32_t timeoutMs, RxPacket &out)
+{
+    if (!_radio)
+        return false;
+
     uint32_t deadline = millis() + timeoutMs;
     do {
-        if (!(_radio->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE)) {
-            delay(2);
-            continue;
-        }
-
-        // A frame arrived: read it, then re-arm RX immediately — filter
-        // rejects must not blind the rest of the window.
-        uint8_t raw[sizeof(PacketHeader) + MAX_PAYLOAD];
-        size_t rawLen = _radio->getPacketLength();
-        int st = _radio->readData(raw, rawLen > sizeof(raw) ? sizeof(raw) : rawLen);
-        float rssi = _radio->getRSSI(), snr = _radio->getSNR();
-        if (st == RADIOLIB_ERR_NONE && rawLen > 0)
-            _rxAirMs += _radio->getTimeOnAir(rawLen) / 1000; // channel occupancy
-        _radio->startReceive();
-        if (st != RADIOLIB_ERR_NONE || rawLen <= sizeof(PacketHeader) ||
-            rawLen > sizeof(raw))
-            continue;
-
-        PacketHeader h;
-        memcpy(&h, raw, sizeof(h));
-        if (h.channel != _hash)
-            continue; // not our channel
-        if (h.from == _nodeNum)
-            continue; // our own packet relayed back to us (rebroadcast peers)
-        if (h.to != _nodeNum && h.to != BROADCAST_ADDR)
-            continue; // not for us
-
-        uint8_t plain[MAX_PAYLOAD];
-        size_t plainLen = rawLen - sizeof(PacketHeader);
-        if (!ctrCrypt(_ch.psk, _ch.pskLen, h.id, h.from, raw + sizeof(h),
-                      plain, plainLen))
-            continue;
-
-        meshtastic_Data data = meshtastic_Data_init_zero;
-        pb_istream_t is = pb_istream_from_buffer(plain, plainLen);
-        if (!pb_decode(&is, meshtastic_Data_fields, &data))
-            continue; // wrong PSK garbage decodes to noise; protobuf catches it
-
-        if (isDuplicate(h.from, h.id))
-            continue; // ReliableRouter retries land here
-
-        out.from = h.from;
-        out.to = h.to;
-        out.id = h.id;
-        out.portnum = data.portnum;
-        out.requestId = data.request_id;
-        out.hopLimit = h.flags & 0x07;
-        out.wantAck = h.flags & 0x08;
-        out.rssi = rssi;
-        out.snr = snr;
-        out.payloadLen = data.payload.size;
-        memcpy(out.payload, data.payload.bytes, data.payload.size);
-        return true;
+        if (poll(out))
+            return true;
+        delay(2);
     } while ((int32_t)(deadline - millis()) > 0);
 
     return false; // window closed; radio stays in RX for the next call
