@@ -170,20 +170,30 @@ public:
     // is detecting preambles that never become frames.
     uint32_t rxDroppedByTx() const { return _rxDroppedByTx; }
 
-    // Airtime accounting since the last resetAirWindow(). TX airtime is exact
-    // (we own every transmit); RX airtime is every frame the radio decoded,
-    // whether or not it passed our filters (channel occupancy is RF-level).
-    // air_util_tx = airTxMs/airWindowMs is honest in any mode; channel util
-    // = (airTxMs+airRxMs)/airWindowMs is meaningful ONLY while continuously
-    // listening (a sleeping node hears almost nothing).
-    // Accumulated internally in MICROSECONDS and divided here, because
-    // getTimeOnAir() returns µs: dividing per packet discarded up to 999 µs each
-    // time, and the error only ever accrued downward. Same accessors, same ms units
-    // — only the accuracy changes.
-    uint32_t airTxMs() const { return _txAirUs / 1000; }
-    uint32_t airRxMs() const { return _rxAirUs / 1000; }
-    uint32_t airWindowMs() const { return millis() - _airWindowStart; }
-    void resetAirWindow() { _txAirUs = 0; _rxAirUs = 0; _airWindowStart = millis(); }
+    // Airtime accounting, ported from Meshtastic's AirTime (src/airtime.{h,cpp}).
+    //
+    // The previous homegrown version had the CALLER own the window: it read
+    // airWindowMs() then called resetAirWindow(), so the denominator was "time since
+    // someone last looked". Once telemetry became change-gated that could be hours,
+    // and the microsecond counters could wrap (~71 min of accumulated airtime) —
+    // producing an arbitrary utilisation that then sized the CSMA contention window.
+    // Fixed buckets remove that entire class of failure: each bucket holds at most
+    // one bucket-period of airtime, and the denominator is a constant.
+
+    // Channel occupancy over a fixed 60 s window (6 x 10 s buckets). Everything on
+    // air counts — our TX and every frame the radio completed, valid or noise —
+    // because occupancy is a property of the channel, not of whether we liked the
+    // packet. This is what getTxDelayMsec() may safely use: bounded 0..100.
+    float channelUtilizationPercent() const;
+
+    // Our own TX duty cycle over a fixed 1 h window (60 x 1 min buckets).
+    float utilizationTxPercent() const;
+
+    // Cumulative totals, diagnostics only. Upstream's note applies:
+    // rxAll - rxValid = airtime from other LoRa radios on our frequency.
+    uint32_t airTxMsTotal() const { return _txMs; }
+    uint32_t airRxMsTotal() const { return _rxValidMs; }
+    uint32_t airRxAllMsTotal() const { return _rxAllMs; }
 
     // Introspection for oracles/tests: the exact frame last transmitted.
     const uint8_t *lastFrame() const { return _frame; }
@@ -250,10 +260,21 @@ private:
     uint32_t _txFailStreak = 0;
     uint32_t _txDropped = 0;
     uint32_t _rxDroppedByTx = 0;
-    // MICROSECONDS (see airTxMs/airRxMs). uint32_t wraps at ~71 min of ACCUMULATED
-    // airtime; resetAirWindow() runs each telemetry interval, so a window holds
-    // seconds. Noted rather than guarded.
-    uint32_t _txAirUs = 0, _rxAirUs = 0, _airWindowStart = 0;
+    // ---- airtime buckets (ported from Meshtastic AirTime) --------------------
+    // Milliseconds, not microseconds: bucketing makes the precision argument moot
+    // (a bucket holds <= its period) and µs is what allowed the wrap.
+    static const uint8_t  AIR_UTIL_BUCKETS   = 6;      // x 10 s = 60 s window
+    static const uint32_t AIR_UTIL_BUCKET_MS = 10000;
+    static const uint8_t  AIR_TX_BUCKETS     = 60;     // x 1 min = 1 h window
+    static const uint32_t AIR_TX_BUCKET_MS   = 60000;
+    uint32_t _chanUtil[AIR_UTIL_BUCKETS] = {0}; // all airtime: our TX + every RX
+    uint32_t _txUtil[AIR_TX_BUCKETS]     = {0}; // our TX only
+    uint32_t _utilEpoch = 0, _txEpoch = 0;      // last bucket index seen, for rotation
+    uint32_t _txMs = 0, _rxValidMs = 0, _rxAllMs = 0; // cumulative, diagnostics only
+
+    enum AirKind { AIR_TX, AIR_RX_VALID, AIR_RX_ALL };
+    void airLog(AirKind kind, uint32_t ms);
+    void airRotate();
 
     bool isDuplicate(uint32_t from, uint32_t id);
     void armRx();                 // startReceive() + set _rxActive

@@ -164,14 +164,83 @@ void MeshtasticTransport::armRx()
 // it is a millis() offset, never a blocking delay(). Idle channel → small window
 // (snappy); busy channel → large window (back off). Channel utilisation is the
 // air-accounting ratio over the current window (app resets it periodically).
+// ---- airtime accounting (ported from Meshtastic AirTime) ---------------------
+// Rotation is driven by millis(), on both write and read, so a quiet radio cannot
+// leave stale airtime sitting in a bucket and inflate the window forever. Buckets
+// skipped entirely (nothing on air for a while) are zeroed as we pass them.
+void MeshtasticTransport::airRotate()
+{
+    uint32_t now = millis();
+
+    uint32_t uSlot = now / AIR_UTIL_BUCKET_MS;
+    if (uSlot != _utilEpoch) {
+        uint32_t skipped = uSlot - _utilEpoch;
+        if (skipped >= AIR_UTIL_BUCKETS) {
+            for (uint8_t i = 0; i < AIR_UTIL_BUCKETS; i++) _chanUtil[i] = 0;
+        } else {
+            for (uint32_t s = 1; s <= skipped; s++)
+                _chanUtil[(_utilEpoch + s) % AIR_UTIL_BUCKETS] = 0;
+        }
+        _utilEpoch = uSlot;
+    }
+
+    uint32_t tSlot = now / AIR_TX_BUCKET_MS;
+    if (tSlot != _txEpoch) {
+        uint32_t skipped = tSlot - _txEpoch;
+        if (skipped >= AIR_TX_BUCKETS) {
+            for (uint8_t i = 0; i < AIR_TX_BUCKETS; i++) _txUtil[i] = 0;
+        } else {
+            for (uint32_t s = 1; s <= skipped; s++)
+                _txUtil[(_txEpoch + s) % AIR_TX_BUCKETS] = 0;
+        }
+        _txEpoch = tSlot;
+    }
+}
+
+void MeshtasticTransport::airLog(AirKind kind, uint32_t ms)
+{
+    airRotate();
+    // Channel occupancy counts ONCE per frame on air, whatever it turned out to be.
+    // (Upstream logs RX_ALL and RX on separate paths, so a valid packet can be
+    // counted twice there; occupancy is a physical fact and we do not inherit that.)
+    _chanUtil[_utilEpoch % AIR_UTIL_BUCKETS] += ms;
+    if (kind == AIR_TX) {
+        _txUtil[_txEpoch % AIR_TX_BUCKETS] += ms;
+        _txMs += ms;
+    } else {
+        // EVERY received frame counts toward rxAll; cleanly-decoded ones are a
+        // SUBSET also counted in rxValid. Only that nesting makes upstream's
+        // "rxAll - rxValid = other radios on our frequency" arithmetic true.
+        _rxAllMs += ms;
+        if (kind == AIR_RX_VALID)
+            _rxValidMs += ms;
+    }
+}
+
+float MeshtasticTransport::channelUtilizationPercent() const
+{
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < AIR_UTIL_BUCKETS; i++) sum += _chanUtil[i];
+    float pct = 100.0f * (float)sum / (float)(AIR_UTIL_BUCKETS * AIR_UTIL_BUCKET_MS);
+    return pct > 100.0f ? 100.0f : pct;
+}
+
+float MeshtasticTransport::utilizationTxPercent() const
+{
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < AIR_TX_BUCKETS; i++) sum += _txUtil[i];
+    float pct = 100.0f * (float)sum / (float)(AIR_TX_BUCKETS * AIR_TX_BUCKET_MS);
+    return pct > 100.0f ? 100.0f : pct;
+}
+
 uint32_t MeshtasticTransport::getTxDelayMsec()
 {
-    uint32_t win = airWindowMs();
-    // _txAirUs/_rxAirUs are MICROSECONDS; win is ms. Divide by 1000 here rather than
-    // per packet, so this shares the corrected accounting instead of re-introducing
-    // the truncation bias it was just fixed for.
-    float util = win ? 100.0f * ((float)(_txAirUs + _rxAirUs) / 1000.0f) / (float)win : 0.0f;
-    if (util > 100.0f) util = 100.0f;
+    // Fixed 60 s rolling window, bounded 0..100 by construction. Previously this
+    // divided by "time since the caller last reset the window", which could grow for
+    // hours once telemetry became change-gated — and the µs numerator could wrap,
+    // yielding an arbitrary utilisation that sized this very backoff. That is what
+    // made the radio appear to stop serving chunks.
+    float util = channelUtilizationPercent();
     uint8_t cw = CWMIN + (uint8_t)((util * (CWMAX - CWMIN)) / 100.0f); // map 0..100 -> CWMIN..CWMAX
     uint32_t span = 1u << cw;                                         // pow_of_2(CWsize)
     return (_rng ? _rng() % span : 0) * _slotTimeMsec;
@@ -208,7 +277,7 @@ void MeshtasticTransport::startSending()
     // frame that never went out still inflated air_util_tx — the metric lied
     // precisely when the radio was misbehaving, and a retry double-counted the same
     // non-transmission.
-    _txAirUs += _radio->getTimeOnAir(it.len);
+    airLog(AIR_TX, _radio->getTimeOnAir(it.len) / 1000);
     _txState = TX_SENDING;
     _txStateMs = millis();
 }
@@ -285,12 +354,15 @@ void MeshtasticTransport::handleRxDone()
     const size_t airLen = rawLen > sizeof(raw) ? sizeof(raw) : rawLen;
     int st = _radio->readData(raw, airLen);
     float rssi = _radio->getRSSI(), snr = _radio->getSNR();
-    // Count occupancy for EVERY frame the radio decoded, including CRC failures.
-    // Occupancy is an RF-level fact: a colliding frame still used ~0.5 s of air at
-    // SF11. Gating this on a clean decode made channel_utilization read near zero in
-    // exactly the congested case the metric exists to detect.
-    if (airLen > 0)
-        _rxAirUs += _radio->getTimeOnAir(airLen);
+    // Count occupancy for EVERY frame the radio completed, including CRC failures:
+    // a colliding frame still used ~0.5 s of air at SF11, and gating this on a clean
+    // decode made utilisation read near zero in exactly the congested case the metric
+    // exists to detect. Upstream agrees — its channelUtilization counts RX_ALL.
+    // Validity is recorded separately (AIR_RX_VALID below) so "other radios on our
+    // frequency" stays derivable, without letting noise masquerade as mesh traffic.
+    const uint32_t airMs = airLen > 0 ? _radio->getTimeOnAir(airLen) / 1000 : 0;
+    if (airMs)
+        airLog(st == RADIOLIB_ERR_NONE ? AIR_RX_VALID : AIR_RX_ALL, airMs);
     armRx();
     if (st != RADIOLIB_ERR_NONE || rawLen <= sizeof(PacketHeader) || rawLen > sizeof(raw))
         return;
