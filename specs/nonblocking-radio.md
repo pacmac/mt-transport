@@ -1,6 +1,6 @@
 ---
 task: nonblocking-radio
-status: proposed — design phase, no code
+status: in progress — steps 2,3,4 done & verified; 5,6 pending
 priority: HIGH (Peter, 2026-07-20: "I see no reason to block the device under any
   circumstances")
 source_hash: ~
@@ -9,6 +9,7 @@ scope:
   - projects/mt-transport/src/MeshtasticTransport.cpp
   - projects/mt-transport/src/MeshtasticTransport.h
   - projects/pac-garage-alarm/src/main.cpp   # branch chunk-integration
+  - projects/mt-transport/clients/node/test/onair-ping.js  # on-air verification harness
 ---
 
 # Spec: nonblocking-radio — no blocking in the message path, ever
@@ -126,17 +127,28 @@ This retires `_rxDroppedByTx` from *counting* the loss to *preventing* it.
 
 ## 5. Verification (step 6, bench unit only)
 
-1. **Static:** `grep delay( ` shows none in the awake message path (transport TX/RX,
+**Harness:** `clients/node/test/onair-ping.js` (Node, no deps). Sends N commands
+via the gateway, correlates each reply by `reply_id` == the command's `packet_id`,
+and reports messages lost, per-command latency (min/avg/max), and — in `--sweep`
+mode — the fastest send interval that still loses nothing. This is THE regression
+tool: run it after any radio-path change. See its `--help`.
+
+1. **No message loss (the bug that motivated step 4):** a burst of commands must
+   ALL be answered. Before: a 4-ping burst 2 s apart returned only the first
+   reply (blocking `sendReplyWithRetry` starved RX; concurrent commands were
+   overwritten in the radio buffer). `onair-ping.js --count 4 --interval 2000`
+   must report 0 lost.
+2. **Static:** `grep delay( ` shows none in the awake message path (transport TX/RX,
    `sendReplyWithRetry`, CSMA). `transmit()` (blocking) gone; `startTransmit()` present.
-2. **Loop liveness:** instrument max `loop()` interval; it must never exceed a
+3. **Loop liveness:** instrument max `loop()` interval; it must never exceed a
    small bound (target < ~50 ms) even across a heartbeat bundle and a command reply.
    Today it exceeds **seconds**.
-3. **The headline proof:** a command `@ping`/`@status` sent so it arrives *during*
-   a heartbeat bundle still gets answered — impossible today because the node is
-   deaf through the whole bundle.
-4. **No regression:** heartbeats decode; a full chunk transfer still completes and
+4. **The headline proof:** a command `@ping`/`@status` sent so it arrives *during*
+   a heartbeat bundle still gets answered — impossible before, the node was deaf
+   through the whole bundle.
+5. **No regression:** heartbeats decode; a full chunk transfer still completes and
    CRC-matches.
-5. **Hardware rules:** bench unit only; OMNI ch2; remote unit never touched.
+6. **Hardware rules:** bench unit only; OMNI ch2; remote unit never touched.
    Register/IRQ setup must be re-applied in `wake()` (survives sleep), per the
    standing `adopt-meshtastic-csma` constraint.
 
