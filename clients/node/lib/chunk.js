@@ -91,7 +91,16 @@ class ChunkClient {
   constructor(send) {
     this.send = send;
     this.reset();
+    // Wall-time of the most recent decoded frame — INCLUDING duplicates. This is
+    // a channel-activity signal: the fetch loop pulls only after it has gone
+    // quiet, so pulls land in the gaps between the Omni's rebroadcast bursts
+    // rather than colliding with the storm. `received` alone can't see this —
+    // dups don't change it, so a saturated channel looks idle.
+    this.lastFrameAt = 0;
   }
+
+  /** ms since any frame (dup or new) last arrived — Infinity before the first. */
+  get sinceLastFrame() { return this.lastFrameAt ? Date.now() - this.lastFrameAt : Infinity; }
 
   reset() {
     this.pid = 0;
@@ -152,6 +161,7 @@ class ChunkClient {
   onFrame(raw) {
     const f = decodeFrame(raw);
     if (!f) return;
+    this.lastFrameAt = Date.now(); // any valid frame (dup included) = channel busy now
 
     if (f.type === MSG.MANIFEST) {
       // A DUPLICATE manifest for the payload we are already fetching must be

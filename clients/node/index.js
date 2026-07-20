@@ -125,7 +125,7 @@ class Client {
    * Throws on GONE, CRC failure, or timeout — never returns a partial, because
    * a plausible-but-wrong image is worse than no image.
    */
-  async fetch(t, pid, { timeoutMs = 300000, batch = 16 } = {}) {
+  async fetch(t, pid, { timeoutMs = 300000, batch = 16, onProgress, deadlineMs } = {}) {
     const c = new chunk.ChunkClient(async (frame) => {
       // The gateway cannot send raw portnums, so pull frames are decoded back
       // into text commands. The device feeds them to the SAME handler a binary
@@ -174,57 +174,69 @@ class Client {
       }
 
       // --- chunks ---
-      // PACING IS LOAD-BEARING. A full frame is ~2.2 s of airtime, so a batch of
-      // 16 occupies the radio for ~35 s. Re-issuing a pull sooner makes the
-      // device RESTART the batch from the first gap, and it never reaches the
-      // end — observed on air as chunks 2..13 arriving repeatedly while 0, 1 and
-      // 14+ never did. Wait for the batch we asked for before asking again.
-      const FRAME_AIRTIME_MS = 2200;
-      // A proxied (camera) payload is served with ~200 ms of I2C per chunk, so
-      // its transfer runs longer and overlaps more of the device's own
-      // telemetry + text-reply resends + the Omni rebroadcast. Measured on air,
-      // that contention drops chunks at RANDOM (stalls landed at 0/42/55/67/86%
-      // across runs — a fixed bug would stall at one index). read() was
-      // instrumented and exonerated: the loss is on-air, not at the source.
-      //
-      // So this loop must tolerate transient loss and keep filling gaps, while
-      // staying BOUNDED — the alarm shares this channel, so "retry forever" is
-      // not acceptable. requestNext() already re-pulls only the missing
-      // contiguous run, so re-pulling wastes no airtime on chunks we hold.
+      // PACING: pull only when the CHANNEL has gone quiet. The device's chunks are
+      // broadcasts the Omni rebroadcasts several times each over ~10 s, so after a
+      // batch the air stays busy long after `received` stops climbing. Firing the
+      // next pull into that storm collides and the pull/serve is lost — the stall
+      // seen at a RANDOM index every run (feed-verified 2026-07-20: the client
+      // re-pulled the right range 8x, the device simply never served it through
+      // the congestion). The old pacing keyed off `received` going quiet, but
+      // duplicates don't change `received`, so a saturated channel looked idle.
+      // Now we wait until no frame AT ALL (duplicates included — see
+      // ChunkClient.lastFrameAt) has arrived for QUIET_MS, THEN pull, so it lands
+      // in a gap between rebroadcast bursts. Reliability over speed: slower, but it
+      // completes. requestNext() re-pulls only the missing contiguous run.
+      const hardMs = deadlineMs != null ? deadlineMs : timeoutMs;
+      const QUIET_MS = 3000;              // no frame for this long => a burst ended
+      const QUIET_MAX_MS = 12000;         // but never wait forever for quiet
+      const PULL_WAIT_MS = batch * 2200 + 8000; // upper bound on one batch landing
+      const emit = () => { if (onProgress) { try { onProgress(
+        { received: c.received, count: c.count, batch, elapsedMs: Date.now() - started });
+      } catch { /* a throwing progress cb must never break the transfer */ } } };
+
       let idle = 0;
-      while (Date.now() - started < timeoutMs) {
-        // GONE: the device evicted this pid, so the bytes are unrecoverable and
-        // a saved partial for it is useless — drop it rather than resume into a
-        // payload that no longer exists.
+      while (Date.now() - started < hardMs) {
+        // GONE: the device evicted this pid, so the bytes are unrecoverable and a
+        // saved partial is useless — drop it rather than resume into a dead payload.
         if (c.gone) { this.store.clearPartial(t, pid); throw new Error(`pid ${pid}: GONE (evicted)`); }
-        if (c.verified) { this.store.clearPartial(t, pid); return c.buf; }
+        if (c.verified) { this.store.clearPartial(t, pid); emit(); return c.buf; }
         if (c.complete && !c.verified) throw new Error(`pid ${pid}: CRC failed after reassembly`);
 
+        // 1) LISTEN before pulling — wait for the channel to fall silent so the
+        //    pull lands in a gap, not on top of the rebroadcast storm. Bounded so
+        //    a permanently-busy channel can't deadlock us.
+        const quietBy = Date.now() + QUIET_MAX_MS;
+        while (c.sinceLastFrame < QUIET_MS && Date.now() < quietBy
+               && Date.now() - started < hardMs) {
+          await this._sleep(200);
+        }
+
+        // 2) pull the next missing contiguous run
         const before = c.received;
         if (!c.requestNext(batch)) { await this._sleep(1000); continue; }
 
-        // End the window as soon as delivery goes quiet, rather than always
-        // waiting the whole batch budget: on a lossy channel the full batch
-        // rarely lands in one window, and ending early re-pulls the gap sooner.
-        const budget = batch * FRAME_AIRTIME_MS + 8000;
-        await this._settleQuiet(
-          () => c.verified || c.received >= before + batch,
-          () => c.received, budget, 3 * FRAME_AIRTIME_MS);
+        // 3) wait for the batch to land: the full batch, OR the channel going
+        //    quiet again after the device has had time to respond (which covers a
+        //    partial or a wholly-lost delivery — either way we re-pull the gap).
+        const pullAt = Date.now();
+        const pullBy = pullAt + PULL_WAIT_MS;
+        while (Date.now() < pullBy && Date.now() - started < hardMs) {
+          if (c.verified || c.received >= before + batch) break;
+          if (c.sinceLastFrame >= QUIET_MS && Date.now() - pullAt >= 3000) break;
+          await this._sleep(200);
+        }
 
-        // Only a window that delivered NOTHING counts toward giving up; any
-        // progress resets the counter. Tolerance is higher than the old 3 (a
-        // contended channel has transient dead patches a recoverable transfer
-        // rides through) but bounded, with timeoutMs as the hard ceiling.
-        idle = (c.received === before) ? idle + 1 : 0;
-        // Persist progress after any window that delivered chunks, so an
-        // interruption (or a stall abort below) loses at most one window and the
-        // next fetch resumes from here rather than from zero.
+        emit();
         if (c.received !== before) {
+          idle = 0;
+          // Persist after any progress so an interruption resumes from here.
           this.store.savePartial(t,
             { pid, crc: c.crc, count: c.count, len: c.len, have: c.have, buf: c.buf });
+        } else {
+          idle++; // only wholly-empty windows count toward giving up
         }
-        if (idle >= 8) throw new Error(
-          `pid ${pid}: stalled at ${c.received}/${c.count} after 8 empty windows`);
+        if (idle >= 12) throw new Error(
+          `pid ${pid}: stalled at ${c.received}/${c.count} after 12 empty windows`);
       }
       throw new Error(`pid ${pid}: timeout at ${Math.round(c.progress * 100)}% (${c.received}/${c.count})`);
     } finally {
