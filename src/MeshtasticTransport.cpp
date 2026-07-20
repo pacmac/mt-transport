@@ -44,6 +44,22 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
     radio.setCurrentLimit(140.0f);
     radio.setDio2AsRfSwitch(true);
     radio.setCRC(RADIOLIB_SX126X_LORA_CRC_ON);
+    // RX sensitivity parity with the reference firmware, which sets BOTH of these in
+    // SX126xInterface::init(). We set neither, so we have been listening on the
+    // RADIOLIB_SX126X_RX_GAIN_POWER_SAVING (0x94) default with the sensitivity patch
+    // absent — a PERMANENT deficit from boot, not an intermittent one.
+    //
+    // persist=true (RadioLib default) also adds REG_RX_GAIN to the chip's retention
+    // list, so boosted gain survives warm-start from sleep.
+    radio.setRxBoostedGainMode(true);
+    // NOT DONE HERE: the undocumented 0x8B5 bit-0 RX-sensitivity patch that upstream
+    // also sets in SX126xInterface::init(). It cannot be applied from outside
+    // RadioLib — SX126x::writeRegister/readRegister/getMod() are all PROTECTED — so
+    // it needs an API decision (subclass SX1262, or a RadioLib-side accessor) that
+    // reaches beyond this file. Tracked on adopt-meshtastic-csma step 7.
+    // Note for whoever does it: upstream re-applies it every AGC_RESET_INTERVAL_MS
+    // (60 s) because its resetAGC() runs CALIBRATE_ALL, which CLEARS the bit. We run
+    // no periodic CALIBRATE_ALL, so we need no timer — unless one is ever added.
 
     // Slot time for the contention model (MT computeSlotTimeMsec, SX126x form):
     // ~2.5 CAD symbols + propagation/turnaround/MAC (0.2+0.4+7 ms). symbolTime =
@@ -435,7 +451,15 @@ bool MeshtasticTransport::wake()
                             // service() re-arms RX.
     if (!_radio)
         return false;
-    return _radio->standby() == RADIOLIB_ERR_NONE;
+    if (_radio->standby() != RADIOLIB_ERR_NONE)
+        return false;
+    // Re-assert boosted RX gain after sleep. REG_RX_GAIN is in the chip's retention
+    // list (setRxBoostedGainMode persists it), so warm start SHOULD restore it — but
+    // the field unit sleeps ~99% of the time and a silently deaf node cannot be
+    // recovered without a site visit. One SPI write per wake against that risk is
+    // not a trade worth arguing about.
+    _radio->setRxBoostedGainMode(true);
+    return true;
 }
 
 } // namespace mt
