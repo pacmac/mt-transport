@@ -70,24 +70,34 @@ public:
     // Returns false on encode, size or radio error.
     // replyId (0 = absent) fills Data.reply_id — Meshtastic apps render the
     // message as a threaded reply to that packet.
+    // Encrypt and ENQUEUE one packet, then return immediately — never blocks.
+    // The frame leaves the antenna later, driven by service() (scheduled send +
+    // async CAD + startTransmit). Returns false on encode/size/crypto error or a
+    // full queue; true means "accepted for transmission", not "on air yet".
     bool send(uint32_t portnum, const uint8_t *payload, size_t len,
               uint32_t to = BROADCAST_ADDR, uint8_t hopLimit = 3,
               uint32_t requestId = 0, uint32_t replyId = 0);
 
-    // Non-blocking RX service. Reads and delivers AT MOST one packet, then
-    // returns immediately — no delay(), no spin. An always-awake app calls this
-    // once per loop() pass; the radio stays armed continuously and a DIO1 IRQ
-    // flags an inbound frame the instant it lands, so liveness no longer depends
-    // on how often (or how slowly) the caller polls. True on a packet that
-    // passed every filter; false when nothing was ready OR a frame arrived but
-    // failed a filter (channel/addr/dup/decrypt) — call again to keep draining.
+    // The pump. Call once every loop() pass. NEVER blocks — no delay(), no spin.
+    // Services one radio interrupt if one fired (RX-done → decode+queue, TX-done
+    // → advance the send queue, CAD-done → gate the pending transmit) and drives
+    // the transmit state machine (scheduled send time, async CAD, startTransmit).
+    // Everything the radio does happens here, on the main context; the ISR only
+    // sets a flag. This is what lets loop() stay live through a whole heartbeat
+    // bundle instead of going deaf for each frame's airtime.
+    void service();
+
+    // Non-blocking RX delivery. Pops AT MOST one decoded packet that service()
+    // has already read off the radio and queued; returns immediately. True on a
+    // packet that passed every filter (channel/addr/dup/decrypt), false when the
+    // queue is empty. Touches no radio state — safe to call right after
+    // service(). Call in a loop to drain more than one.
     bool poll(RxPacket &out);
 
-    // Bounded listen (the Class-A window; a sleep-cycle RX window calls it).
-    // Loops poll() until a good packet lands or timeoutMs elapses. True when a
-    // packet on OUR channel, addressed to us or broadcast, decrypts, decodes and
-    // is not a recent duplicate. Frames failing any filter are dropped and the
-    // wait continues to the deadline. The awake loop should prefer poll().
+    // Bounded listen (the Class-A window; the sleep-cycle RX window uses it).
+    // Loops service()+poll() until a good packet lands or timeoutMs elapses. The
+    // delay(2) yield here is confined to this sleep-adjacent path; the always-awake
+    // loop() calls service()+poll() directly and never blocks.
     bool receive(uint32_t timeoutMs, RxPacket &out);
 
     // Protocol ACK: Routing{error_reason=NONE} on ROUTING_APP with
@@ -102,7 +112,9 @@ public:
     // Use to shore up one-shot replies on lossy links.
     bool resend();
 
-    bool busy() const { return false; } // transmit() is blocking; real once RX lands
+    // True while a transmission is queued or in flight — the send path is async
+    // now, so this actually means something (unlike the old blocking transmit()).
+    bool busy() const { return _txState != TX_IDLE || _txCount > 0; }
 
     // Radio only — CPU sleep is yours. Both return whether the radio
     // acknowledged; a caller that ignores the result is back to a silently
@@ -162,19 +174,40 @@ private:
     uint32_t     _lastId = 0;
 
     static const size_t MAX_PAYLOAD = 237; // MAX_LORA_PAYLOAD_LEN+1-16 (RadioInterface.h:66)
-    uint8_t _frame[sizeof(PacketHeader) + MAX_PAYLOAD];
+    static const size_t FRAME_CAP = sizeof(PacketHeader) + MAX_PAYLOAD;
+    uint8_t _frame[FRAME_CAP];    // introspection: the most recently built frame
     size_t  _frameLen = 0;
 
     bool _rxActive = false;       // radio currently in RX (survives short polls)
 
-    // DIO1 RX interrupt. RadioLib's setDio1Action takes a plain void(*)(void),
-    // so the handler is a static trampoline that flags the one live instance —
-    // this app has a single radio. The ISR does NOTHING but set the flag (no
-    // SPI, no library calls): the actual readData() happens in poll(), on the
-    // main context. _rxReady is volatile because the ISR and poll() race on it.
+    // DIO1 interrupt. RadioLib's setDio1Action takes a plain void(*)(void), so the
+    // handler is a static trampoline that flags the one live instance — this app
+    // has a single radio. The ISR does NOTHING but set the flag (no SPI, no
+    // library calls); service() reads getIrqFlags() on the main context to learn
+    // WHICH event it was. DIO1 fires for RX-done, TX-done AND CAD-done, so the
+    // flag is generic. Volatile: the ISR and service() race on it.
     static MeshtasticTransport *_isrTarget;
     static void _onDio1Rx();
-    volatile bool _rxReady = false;
+    volatile bool _radioEvent = false;
+
+    // Outbound queue + transmit state machine (async, non-blocking).
+    enum TxState : uint8_t { TX_IDLE, TX_WAITING, TX_SCANNING, TX_SENDING };
+    struct TxItem {
+        uint8_t  frame[FRAME_CAP];
+        uint16_t len;
+        uint32_t txAfter;   // millis() gate — do not transmit before this
+        uint8_t  attempts;  // CSMA backoff count; >=8 fails open (transmit anyway)
+    };
+    static const uint8_t TXQ_N = 8;   // holds a full heartbeat bundle without blocking
+    TxItem   _txq[TXQ_N];
+    uint8_t  _txHead = 0, _txCount = 0;
+    TxState  _txState = TX_IDLE;
+    uint32_t _txStateMs = 0;          // when the current SCANNING/SENDING began (timeout safety)
+
+    // Decoded RX packets service() has pulled off the radio, waiting for poll().
+    static const uint8_t RXQ_N = 4;
+    RxPacket _rxq[RXQ_N];
+    uint8_t  _rxqHead = 0, _rxqCount = 0;
 
     uint64_t _seen[8] = {0};      // (from<<32|id) dedupe ring
     uint8_t  _seenIdx = 0;
@@ -182,9 +215,15 @@ private:
     uint32_t _txFailStreak = 0;
     uint32_t _rxDroppedByTx = 0;
     uint32_t _txAirMs = 0, _rxAirMs = 0, _airWindowStart = 0;
+
     bool isDuplicate(uint32_t from, uint32_t id);
-    void waitForClearChannel();   // CSMA: CAD + backoff, fail-open ~2 s
-    bool transmitFrame();         // the ONE transmit path: CSMA + airtime + transmit
+    void armRx();                 // startReceive() + set _rxActive
+    void handleRxDone();          // read one frame off the radio, decode, queue it
+    bool pushRx(const RxPacket &p);
+    bool enqueueFrame(const uint8_t *frame, size_t len); // copy into the TX ring
+    void driveTx();               // advance the TX state machine (timing)
+    void startSending();          // startTransmit() the head item (+ airtime accounting)
+    uint32_t backoffMs(uint8_t attempt);
 };
 
 } // namespace mt

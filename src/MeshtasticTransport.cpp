@@ -19,7 +19,7 @@ MeshtasticTransport *MeshtasticTransport::_isrTarget = nullptr;
 void MeshtasticTransport::_onDio1Rx()
 {
     if (_isrTarget)
-        _isrTarget->_rxReady = true; // nothing else in the ISR — no SPI, no calls
+        _isrTarget->_radioEvent = true; // nothing else in the ISR — no SPI, no calls
 }
 
 bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
@@ -63,7 +63,6 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
 {
     if (!_radio || len > sizeof(meshtastic_Data_payload_t::bytes))
         return false;
-    _rxActive = false; // transmit takes the radio out of RX
 
     // Envelope: Data{portnum, payload}
     meshtastic_Data data = meshtastic_Data_init_zero;
@@ -83,10 +82,12 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     uint32_t id = _rng();
     if (id == 0)
         id = 1;
-    _lastId = id;
 
-    uint8_t *cipher = _frame + sizeof(PacketHeader);
-    if (!ctrCrypt(_ch.psk, _ch.pskLen, id, _nodeNum, plain, cipher, plainLen))
+    // Build into a LOCAL frame, then enqueue. send() never touches the radio and
+    // never blocks; service() transmits it later. Crypto/size are rejected here,
+    // before the queue, so only sendable frames are ever queued.
+    uint8_t f[FRAME_CAP];
+    if (!ctrCrypt(_ch.psk, _ch.pskLen, id, _nodeNum, plain, f + sizeof(PacketHeader), plainLen))
         return false;
 
     PacketHeader h;
@@ -97,76 +98,225 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     h.channel = _hash;
     h.next_hop = 0;
     h.relay_node = 0;
-    memcpy(_frame, &h, sizeof(h));
-    _frameLen = sizeof(h) + plainLen;
+    memcpy(f, &h, sizeof(h));
+    size_t frameLen = sizeof(h) + plainLen;
 
-    return transmitFrame();
+    if (!enqueueFrame(f, frameLen))
+        return false; // queue full — caller may retry
+
+    // Introspection (lastFrame/lastPacketId): the most recently built frame.
+    _lastId = id;
+    memcpy(_frame, f, frameLen);
+    _frameLen = frameLen;
+    return true;
 }
 
-void MeshtasticTransport::waitForClearChannel()
+// Copy a fully-built frame into the outbound ring. txAfter = now (step 4 will
+// derive a channel-utilisation spacing here). Returns false if the ring is full.
+bool MeshtasticTransport::enqueueFrame(const uint8_t *frame, size_t len)
 {
-    // Listen-before-talk: transmitting blind is how deployment #1 lost
-    // nearly every reply. CAD before TX; escalating random backoff while the
-    // channel is busy; FAIL-OPEN after ~2 s — an alarm that politely never
-    // speaks is worse than a collision.
-    _rxActive = false; // CAD ends in standby
-    for (int attempt = 0; attempt < 8; attempt++) {
-        if (_radio->scanChannel() == RADIOLIB_CHANNEL_FREE)
-            return;
-        _csmaDeferrals++;
-        // CAD said BUSY, which means a preamble was detected — a packet is
-        // arriving right now. LISTEN to it rather than sitting deaf in standby
-        // for the whole backoff. The reference firmware does exactly this
-        // (RadioLibInterface.cpp:462: startReceive() before rescheduling).
-        //
-        // Partial fix, honestly: we can hear the frame but cannot deliver it,
-        // because this is blocking and several frames deep inside send(). A
-        // frame that lands here is counted by _rxDroppedByTx below rather than
-        // vanishing silently. Draining it properly needs the async restructure.
-        if (_radio->startReceive() == RADIOLIB_ERR_NONE)
-            _rxActive = true;
-        uint32_t window = 60u << (attempt < 3 ? attempt : 3);
-        delay(30 + (_rng ? _rng() : 0) % window);
-        _rxActive = false; // the next scanChannel() returns the chip to standby
-    }
-    // 8 busy scans: transmit anyway.
-}
-
-// The single choke point for every transmission. send() and resend() both
-// route through here, so CSMA, airtime accounting and the transmit itself can
-// never drift apart (F6) — and there is exactly one place that knows whether a
-// frame actually reached the antenna.
-//
-// Airtime is computed BEFORE transmit() and must stay that way:
-// getTimeOnAir() opens with a getPacketType() SPI read, which is valid in
-// standby (where CAD leaves the chip) but returns garbage in sleep.
-bool MeshtasticTransport::transmitFrame()
-{
-    waitForClearChannel();                              // also clears _rxActive
-    _txAirMs += _radio->getTimeOnAir(_frameLen) / 1000;
-    // Only radio-level outcomes reach here: send() rejects encode/size/crypto
-    // failures before this point, so the streak can never be inflated by a bad
-    // payload. A sustained streak therefore means hardware, not contention —
-    // CSMA fails open, so a busy channel still reaches transmit() and a healthy
-    // radio still clears the count.
-    // A frame may have arrived while we were backing off. Transmitting now
-    // destroys it, and we cannot deliver it — this path is blocking, several
-    // frames deep inside send(), with nowhere to hand a packet back to. So
-    // COUNT the loss rather than hide it: silent loss is exactly what made the
-    // 2026-07-18 investigation so expensive.
-    if (_radio->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE)
-        _rxDroppedByTx++;
-    if (_radio->transmit(_frame, _frameLen) != RADIOLIB_ERR_NONE) {
-        _txFailStreak++;
+    if (len == 0 || len > FRAME_CAP || _txCount >= TXQ_N)
         return false;
-    }
-    _txFailStreak = 0;
-    // Re-arm RX immediately. Otherwise the chip sits in STDBY_RC — deaf — until
-    // the application happens to call receive() again, which from the library's
-    // point of view is an unbounded window.
+    uint8_t tail = (_txHead + _txCount) % TXQ_N;
+    memcpy(_txq[tail].frame, frame, len);
+    _txq[tail].len = (uint16_t)len;
+    _txq[tail].txAfter = millis();
+    _txq[tail].attempts = 0;
+    _txCount++;
+    return true;
+}
+
+void MeshtasticTransport::armRx()
+{
     if (_radio->startReceive() == RADIOLIB_ERR_NONE)
         _rxActive = true;
+}
+
+// Escalating randomized backoff. This is a RESCHEDULE (a millis() gate), not a
+// delay() — the CPU is never blocked. Mirrors the old window 60ms<<min(n,3)+jitter.
+// Step 4 replaces this with the channel-utilisation-derived getTxDelayMsec model.
+uint32_t MeshtasticTransport::backoffMs(uint8_t attempt)
+{
+    uint32_t window = 60u << (attempt < 3 ? attempt : 3);
+    return 30u + (_rng ? _rng() : 0) % window;
+}
+
+// Choke point for the actual transmit: airtime accounting + startTransmit. The
+// chip is in standby here (CAD left it there; or RX on the fail-open path, which
+// startTransmit stands by anyway). getTimeOnAir's getPacketType() SPI read is
+// valid in standby — the "garbage in sleep" hazard does not apply, we never
+// transmit from sleep. Non-blocking: returns as soon as TX is started; TX-done
+// arrives later as a DIO1 interrupt.
+void MeshtasticTransport::startSending()
+{
+    TxItem &it = _txq[_txHead];
+    // A frame may have arrived while RX was armed between backoffs; transmitting
+    // destroys it. service() now drains RX normally, so this is rare, but a frame
+    // caught at this exact instant is still lost — COUNT it (step 5 adds the
+    // isActivelyReceiving guard that prevents it instead).
+    if (_radio->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE)
+        _rxDroppedByTx++;
+    _txAirMs += _radio->getTimeOnAir(it.len) / 1000;
+    _rxActive = false;
+    memcpy(_frame, it.frame, it.len); // introspection: the frame going on air
+    _frameLen = it.len;
+    if (_radio->startTransmit(it.frame, it.len) != RADIOLIB_ERR_NONE) {
+        _txFailStreak++;
+        _txCount--; _txHead = (_txHead + 1) % TXQ_N; // drop the unsendable frame
+        _txState = TX_IDLE;
+        armRx();
+        return;
+    }
+    _txState = TX_SENDING;
+    _txStateMs = millis();
+}
+
+// Advance the TX state machine by time. Never blocks: it either starts an async
+// CAD, starts a transmit, or waits for the scheduled instant / an interrupt.
+void MeshtasticTransport::driveTx()
+{
+    uint32_t now = millis();
+    if (_txState == TX_IDLE && _txCount > 0)
+        _txState = TX_WAITING;
+
+    switch (_txState) {
+    case TX_WAITING: {
+        if (_txCount == 0) { _txState = TX_IDLE; break; }
+        TxItem &it = _txq[_txHead];
+        if ((int32_t)(now - it.txAfter) < 0)
+            break; // scheduled for later — come back next pass
+        if (it.attempts >= 8) {            // fail-open: 8 busy scans, send anyway
+            startSending();
+        } else if (_radio->startChannelScan() == RADIOLIB_ERR_NONE) {
+            _txState = TX_SCANNING;        // CAD result arrives as a DIO1 interrupt
+            _txStateMs = now;
+            _rxActive = false;
+        } else {
+            startSending();                // CAD could not start — just send
+        }
+        break;
+    }
+    case TX_SCANNING:
+        // Safety net: if the CAD-done interrupt is missed, don't wedge — CAD is a
+        // few symbols (tens of ms), so after 200 ms give up scanning and send.
+        if ((int32_t)(now - _txStateMs) > 200)
+            startSending();
+        break;
+    case TX_SENDING:
+        // Safety net: if TX-done is missed, force-finish after airtime+margin so
+        // one frame can never stall the queue forever.
+        if ((int32_t)(now - _txStateMs) > 5000) {
+            _radio->finishTransmit();
+            _txFailStreak++;
+            _txCount--; _txHead = (_txHead + 1) % TXQ_N;
+            _txState = TX_IDLE;
+            armRx();
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+bool MeshtasticTransport::pushRx(const RxPacket &p)
+{
+    if (_rxqCount >= RXQ_N)
+        return false; // app not draining fast enough — drop this frame, not older ones
+    uint8_t tail = (_rxqHead + _rxqCount) % RXQ_N;
+    _rxq[tail] = p;
+    _rxqCount++;
     return true;
+}
+
+// Read one completed frame off the radio, decode+filter it, and queue it for
+// poll(). Re-arms RX immediately so a reject does not blind us.
+void MeshtasticTransport::handleRxDone()
+{
+    uint8_t raw[FRAME_CAP];
+    size_t rawLen = _radio->getPacketLength();
+    int st = _radio->readData(raw, rawLen > sizeof(raw) ? sizeof(raw) : rawLen);
+    float rssi = _radio->getRSSI(), snr = _radio->getSNR();
+    if (st == RADIOLIB_ERR_NONE && rawLen > 0)
+        _rxAirMs += _radio->getTimeOnAir(rawLen) / 1000; // channel occupancy
+    armRx();
+    if (st != RADIOLIB_ERR_NONE || rawLen <= sizeof(PacketHeader) || rawLen > sizeof(raw))
+        return;
+
+    PacketHeader h;
+    memcpy(&h, raw, sizeof(h));
+    if (h.channel != _hash)
+        return; // not our channel
+    if (h.from == _nodeNum)
+        return; // our own packet relayed back to us (rebroadcast peers)
+    if (h.to != _nodeNum && h.to != BROADCAST_ADDR)
+        return; // not for us
+
+    uint8_t plain[MAX_PAYLOAD];
+    size_t plainLen = rawLen - sizeof(PacketHeader);
+    if (!ctrCrypt(_ch.psk, _ch.pskLen, h.id, h.from, raw + sizeof(h), plain, plainLen))
+        return;
+
+    meshtastic_Data data = meshtastic_Data_init_zero;
+    pb_istream_t is = pb_istream_from_buffer(plain, plainLen);
+    if (!pb_decode(&is, meshtastic_Data_fields, &data))
+        return; // wrong PSK garbage decodes to noise; protobuf catches it
+
+    if (isDuplicate(h.from, h.id))
+        return; // ReliableRouter retries land here
+
+    RxPacket p;
+    p.from = h.from;
+    p.to = h.to;
+    p.id = h.id;
+    p.portnum = data.portnum;
+    p.requestId = data.request_id;
+    p.hopLimit = h.flags & 0x07;
+    p.wantAck = h.flags & 0x08;
+    p.rssi = rssi;
+    p.snr = snr;
+    p.payloadLen = data.payload.size;
+    memcpy(p.payload, data.payload.bytes, data.payload.size);
+    pushRx(p);
+}
+
+// The pump. Non-blocking: services at most one radio interrupt (the DIO1 flag
+// tells us something happened; getIrqFlags tells us WHAT), then advances the TX
+// state machine. RX-done → decode+queue; TX-done → drop the sent frame + next;
+// CAD-done → free: send, busy: listen + reschedule. Called every loop() pass.
+void MeshtasticTransport::service()
+{
+    if (!_radio)
+        return;
+
+    if (_radioEvent) {
+        _radioEvent = false;
+        uint16_t irq = _radio->getIrqFlags();
+
+        if (_txState == TX_SENDING && (irq & RADIOLIB_SX126X_IRQ_TX_DONE)) {
+            _radio->finishTransmit();                     // clears IRQ, chip to standby
+            _txFailStreak = 0;
+            _txCount--; _txHead = (_txHead + 1) % TXQ_N;  // sent — drop it
+            _txState = TX_IDLE;
+            armRx();
+        } else if (_txState == TX_SCANNING &&
+                   (irq & (RADIOLIB_SX126X_IRQ_CAD_DONE | RADIOLIB_SX126X_IRQ_CAD_DETECTED))) {
+            if (irq & RADIOLIB_SX126X_IRQ_CAD_DETECTED) {
+                // Busy: a preamble is on air. LISTEN (don't sit deaf), back off,
+                // retry the same frame later. Live listen with zero blocking.
+                _csmaDeferrals++;
+                _txq[_txHead].attempts++;
+                _txq[_txHead].txAfter = millis() + backoffMs(_txq[_txHead].attempts);
+                _txState = TX_WAITING;
+                armRx();
+            } else {
+                startSending();                           // channel free — go
+            }
+        } else if (irq & RADIOLIB_SX126X_IRQ_RX_DONE) {
+            handleRxDone();
+        }
+    }
+
+    driveTx();
 }
 
 bool MeshtasticTransport::isDuplicate(uint32_t from, uint32_t id)
@@ -182,79 +332,21 @@ bool MeshtasticTransport::isDuplicate(uint32_t from, uint32_t id)
 
 bool MeshtasticTransport::poll(RxPacket &out)
 {
-    if (!_radio)
+    // Pure queue pop — service() already did the radio read and decode. No radio
+    // access here, so it cannot race service() for the SPI bus.
+    if (_rxqCount == 0)
         return false;
-
-    // Keep the radio armed. Normally begin()/the last transmit left it in RX;
-    // this covers a cold first call or a path that dropped RX.
-    if (!_rxActive) {
-        if (_radio->startReceive() != RADIOLIB_ERR_NONE)
-            return false;
-        _rxActive = true;
-    }
-
-    // Fast idle path: the DIO1 ISR sets _rxReady on RxDone. Only when it is not
-    // set do we pay an SPI getIrqFlags() read — proven-safe ground truth that
-    // also catches a frame that completed as RX was (re)armed. Either way,
-    // nothing is read from the radio until a frame is actually present.
-    if (!_rxReady && !(_radio->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE))
-        return false;
-    _rxReady = false;
-
-    // A frame arrived: read it, then re-arm RX immediately — a filter reject
-    // must not blind us until the next call.
-    uint8_t raw[sizeof(PacketHeader) + MAX_PAYLOAD];
-    size_t rawLen = _radio->getPacketLength();
-    int st = _radio->readData(raw, rawLen > sizeof(raw) ? sizeof(raw) : rawLen);
-    float rssi = _radio->getRSSI(), snr = _radio->getSNR();
-    if (st == RADIOLIB_ERR_NONE && rawLen > 0)
-        _rxAirMs += _radio->getTimeOnAir(rawLen) / 1000; // channel occupancy
-    _radio->startReceive();
-    if (st != RADIOLIB_ERR_NONE || rawLen <= sizeof(PacketHeader) ||
-        rawLen > sizeof(raw))
-        return false;
-
-    PacketHeader h;
-    memcpy(&h, raw, sizeof(h));
-    if (h.channel != _hash)
-        return false; // not our channel
-    if (h.from == _nodeNum)
-        return false; // our own packet relayed back to us (rebroadcast peers)
-    if (h.to != _nodeNum && h.to != BROADCAST_ADDR)
-        return false; // not for us
-
-    uint8_t plain[MAX_PAYLOAD];
-    size_t plainLen = rawLen - sizeof(PacketHeader);
-    if (!ctrCrypt(_ch.psk, _ch.pskLen, h.id, h.from, raw + sizeof(h),
-                  plain, plainLen))
-        return false;
-
-    meshtastic_Data data = meshtastic_Data_init_zero;
-    pb_istream_t is = pb_istream_from_buffer(plain, plainLen);
-    if (!pb_decode(&is, meshtastic_Data_fields, &data))
-        return false; // wrong PSK garbage decodes to noise; protobuf catches it
-
-    if (isDuplicate(h.from, h.id))
-        return false; // ReliableRouter retries land here
-
-    out.from = h.from;
-    out.to = h.to;
-    out.id = h.id;
-    out.portnum = data.portnum;
-    out.requestId = data.request_id;
-    out.hopLimit = h.flags & 0x07;
-    out.wantAck = h.flags & 0x08;
-    out.rssi = rssi;
-    out.snr = snr;
-    out.payloadLen = data.payload.size;
-    memcpy(out.payload, data.payload.bytes, data.payload.size);
+    out = _rxq[_rxqHead];
+    _rxqHead = (_rxqHead + 1) % RXQ_N;
+    _rxqCount--;
     return true;
 }
 
-// Bounded blocking listen, built on poll(). This is the SLEEP-window listener
-// (sleepCycle); the always-awake loop() calls poll() directly and never blocks
-// here. The delay(2) yield is confined to this sleep-adjacent path — it is not
-// in the awake message path the nonblocking-radio task is clearing.
+// Bounded blocking listen, built on service()+poll(). This is the SLEEP-window
+// listener (sleepCycle); the always-awake loop() calls service()+poll() directly
+// and never blocks here. service() is pumped inside the loop so RX is decoded and
+// any queued TX still drains while we wait. The delay(2) yield is confined to
+// this sleep-adjacent path — not the awake message path this task is clearing.
 bool MeshtasticTransport::receive(uint32_t timeoutMs, RxPacket &out)
 {
     if (!_radio)
@@ -262,6 +354,7 @@ bool MeshtasticTransport::receive(uint32_t timeoutMs, RxPacket &out)
 
     uint32_t deadline = millis() + timeoutMs;
     do {
+        service();
         if (poll(out))
             return true;
         delay(2);
@@ -286,9 +379,11 @@ bool MeshtasticTransport::sendAck(uint32_t to, uint32_t requestId)
 
 bool MeshtasticTransport::resend()
 {
+    // Re-enqueue the last built frame verbatim — same id, same bytes, so receivers
+    // that caught the first copy dedupe this one. Non-blocking like send().
     if (!_radio || _frameLen == 0)
         return false;
-    return transmitFrame();
+    return enqueueFrame(_frame, _frameLen);
 }
 
 bool MeshtasticTransport::sleep()
@@ -313,6 +408,11 @@ bool MeshtasticTransport::sleep()
 bool MeshtasticTransport::wake()
 {
     _rxActive = false;
+    _txState = TX_IDLE;     // radio comes back in standby — restart the TX SM
+                            // cleanly; queued frames survive and re-drive via
+                            // service(). The DIO1 action (MCU interrupt) persists
+                            // across radio sleep, so RX flags itself again once
+                            // service() re-arms RX.
     if (!_radio)
         return false;
     return _radio->standby() == RADIOLIB_ERR_NONE;
