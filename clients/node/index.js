@@ -173,23 +173,17 @@ class Client {
         this.store.clearPartial(t, pid); // same pid, different image — discard
       }
 
-      // --- chunks ---
-      // PACING: pull only when the CHANNEL has gone quiet. The device's chunks are
-      // broadcasts the Omni rebroadcasts several times each over ~10 s, so after a
-      // batch the air stays busy long after `received` stops climbing. Firing the
-      // next pull into that storm collides and the pull/serve is lost — the stall
-      // seen at a RANDOM index every run (feed-verified 2026-07-20: the client
-      // re-pulled the right range 8x, the device simply never served it through
-      // the congestion). The old pacing keyed off `received` going quiet, but
-      // duplicates don't change `received`, so a saturated channel looked idle.
-      // Now we wait until no frame AT ALL (duplicates included — see
-      // ChunkClient.lastFrameAt) has arrived for QUIET_MS, THEN pull, so it lands
-      // in a gap between rebroadcast bursts. Reliability over speed: slower, but it
-      // completes. requestNext() re-pulls only the missing contiguous run.
+      // --- chunks (DEVICE-DRIVEN pacing) ---
+      // The device tells us when to pull. We pull, then wait for its answer:
+      // chunks (progress), or MSG_BUSY{retry_after} — wait that long, then re-pull
+      // the SAME range. We do NOT guess channel state; the device owns the pace
+      // (it alone knows its TX queue + how long since it last served, i.e. whether
+      // its own rebroadcast storm has settled). A bounded fallback covers a lost
+      // MSG_BUSY. requestNext() re-pulls only the missing contiguous run.
+      // Reliability over speed. See specs/chunk-flow-control.md.
       const hardMs = deadlineMs != null ? deadlineMs : timeoutMs;
-      const QUIET_MS = 3000;              // no frame for this long => a burst ended
-      const QUIET_MAX_MS = 12000;         // but never wait forever for quiet
-      const PULL_WAIT_MS = batch * 2200 + 8000; // upper bound on one batch landing
+      const ANSWER_MS = 6000;                 // wait for the device's answer to a pull
+      const BATCH_MS  = batch * 2200 + 4000;  // then for the rest of the batch to land
       const emit = () => { if (onProgress) { try { onProgress(
         { received: c.received, count: c.count, batch, elapsedMs: Date.now() - started });
       } catch { /* a throwing progress cb must never break the transfer */ } } };
@@ -202,41 +196,46 @@ class Client {
         if (c.verified) { this.store.clearPartial(t, pid); emit(); return c.buf; }
         if (c.complete && !c.verified) throw new Error(`pid ${pid}: CRC failed after reassembly`);
 
-        // 1) LISTEN before pulling — wait for the channel to fall silent so the
-        //    pull lands in a gap, not on top of the rebroadcast storm. Bounded so
-        //    a permanently-busy channel can't deadlock us.
-        const quietBy = Date.now() + QUIET_MAX_MS;
-        while (c.sinceLastFrame < QUIET_MS && Date.now() < quietBy
-               && Date.now() - started < hardMs) {
-          await this._sleep(200);
-        }
-
-        // 2) pull the next missing contiguous run
         const before = c.received;
+        c.clearBusy();                        // fresh pull: reset the BUSY latch
         if (!c.requestNext(batch)) { await this._sleep(1000); continue; }
 
-        // 3) wait for the batch to land: the full batch, OR the channel going
-        //    quiet again after the device has had time to respond (which covers a
-        //    partial or a wholly-lost delivery — either way we re-pull the gap).
-        const pullAt = Date.now();
-        const pullBy = pullAt + PULL_WAIT_MS;
-        while (Date.now() < pullBy && Date.now() - started < hardMs) {
-          if (c.verified || c.received >= before + batch) break;
-          if (c.sinceLastFrame >= QUIET_MS && Date.now() - pullAt >= 3000) break;
-          await this._sleep(200);
+        // Wait for the device's answer: chunks start arriving, a BUSY latch, or
+        // silence — whichever first.
+        const answerBy = Date.now() + ANSWER_MS;
+        while (Date.now() < answerBy && Date.now() - started < hardMs) {
+          if (c.verified || c.received > before || c.busyUntil > Date.now()) break;
+          await this._sleep(150);
         }
 
-        emit();
-        if (c.received !== before) {
+        if (c.busyUntil > Date.now()) {
+          // OBEY the device: it said "retry after N". Wait it out — being throttled
+          // is not a stall, so it does not count toward giving up.
+          await this._sleep(Math.min(c.busyUntil - Date.now(), 60000));
           idle = 0;
+          continue;
+        }
+
+        if (c.received > before) {
+          idle = 0;
+          // Let the rest of this batch arrive before pulling the next range.
+          const batchBy = Date.now() + BATCH_MS;
+          while (Date.now() < batchBy && Date.now() - started < hardMs) {
+            if (c.verified || c.received >= before + batch || c.busyUntil > Date.now()) break;
+            await this._sleep(150);
+          }
+          emit();
           // Persist after any progress so an interruption resumes from here.
           this.store.savePartial(t,
             { pid, crc: c.crc, count: c.count, len: c.len, have: c.have, buf: c.buf });
         } else {
-          idle++; // only wholly-empty windows count toward giving up
+          // Silence — neither chunks nor a BUSY (lost pull or lost answer). The
+          // fallback is to loop and re-pull; bounded by the idle count.
+          idle++;
+          emit();
         }
         if (idle >= 12) throw new Error(
-          `pid ${pid}: stalled at ${c.received}/${c.count} after 12 empty windows`);
+          `pid ${pid}: stalled at ${c.received}/${c.count} after 12 empty windows (no serve, no busy)`);
       }
       throw new Error(`pid ${pid}: timeout at ${Math.round(c.progress * 100)}% (${c.received}/${c.count})`);
     } finally {
@@ -252,26 +251,6 @@ class Client {
     while (Date.now() < end) {
       if (cond()) return true;
       await this._sleep(400);
-    }
-    return cond();
-  }
-
-  /**
-   * Like _settle, but also returns early once progress() has stopped changing
-   * for quietMs — i.e. the batch's deliverable chunks have arrived and the rest
-   * were lost. Ending the window then lets the caller re-pull the gap promptly
-   * instead of idling out the whole budget. Returns true only if cond() held.
-   */
-  async _settleQuiet(cond, progress, ms, quietMs) {
-    const end = Date.now() + ms;
-    let last = progress();
-    let lastChange = Date.now();
-    while (Date.now() < end) {
-      if (cond()) return true;
-      const p = progress();
-      if (p !== last) { last = p; lastChange = Date.now(); }
-      else if (Date.now() - lastChange >= quietMs) return false; // gone quiet
-      await this._sleep(300);
     }
     return cond();
   }

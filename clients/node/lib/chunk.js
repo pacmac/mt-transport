@@ -97,16 +97,15 @@ class ChunkClient {
   constructor(send) {
     this.send = send;
     this.reset();
-    // Wall-time of the most recent decoded frame — INCLUDING duplicates. This is
-    // a channel-activity signal: the fetch loop pulls only after it has gone
-    // quiet, so pulls land in the gaps between the Omni's rebroadcast bursts
-    // rather than colliding with the storm. `received` alone can't see this —
-    // dups don't change it, so a saturated channel looks idle.
-    this.lastFrameAt = 0;
+    // Device-driven pacing: when the server answers a pull with MSG_BUSY it sets
+    // this to "do not pull again until" (epoch ms). The fetch loop obeys it — the
+    // DEVICE owns the pace; the client never guesses channel state (that was the
+    // old client-side channel-quiet heuristic, now removed).
+    this.busyUntil = 0;
   }
 
-  /** ms since any frame (dup or new) last arrived — Infinity before the first. */
-  get sinceLastFrame() { return this.lastFrameAt ? Date.now() - this.lastFrameAt : Infinity; }
+  /** Clear the BUSY latch just before issuing a fresh pull. */
+  clearBusy() { this.busyUntil = 0; }
 
   reset() {
     this.pid = 0;
@@ -167,7 +166,14 @@ class ChunkClient {
   onFrame(raw) {
     const f = decodeFrame(raw);
     if (!f) return;
-    this.lastFrameAt = Date.now(); // any valid frame (dup included) = channel busy now
+
+    if (f.type === MSG.BUSY) {
+      // Device-driven flow control: "retry this range after retry_after_ms." Obey
+      // it — do not re-pull until then. Guard on pid so a stale BUSY for a
+      // different payload can't throttle this fetch.
+      if (f.pid === this.pid) this.busyUntil = Date.now() + f.retryAfterMs;
+      return;
+    }
 
     if (f.type === MSG.MANIFEST) {
       // A DUPLICATE manifest for the payload we are already fetching must be
