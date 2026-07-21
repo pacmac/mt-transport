@@ -112,6 +112,8 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     if (!ctrCrypt(_ch.psk, _ch.pskLen, id, _nodeNum, plain, f + sizeof(PacketHeader), plainLen))
         return false;
 
+    if (_hopOverride) hopLimit = _hopOverride;   // test override (setHopOverride) — forces every frame
+
     PacketHeader h;
     h.to = to;
     h.from = _nodeNum;
