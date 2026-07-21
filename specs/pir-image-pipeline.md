@@ -5,7 +5,7 @@ priority: HIGH — this is how images actually get taken; the manual path is the
 source_hash: ~
 scope:
   - projects/timercam-chunk/src/main.cpp          # ESP32 queue + split commands
-  - projects/pac-garage-alarm/src/CamQueue.h      # NEW — nRF client for the extended I2C set
+  - projects/pac-garage-alarm/src/CamQueue.h      # NEW — nRF client (UART transport, I2C fallback)
   - projects/pac-garage-alarm/src/main.cpp        # PIR -> snap, drain loop, counters, status flag
 ---
 
@@ -147,20 +147,74 @@ and that is not a contradiction:
 - **Automatic upload** → there is no stated intent to override. Take what the device
   advertises.
 
-## 7. Power switching (hardware, needs Peter)
+## 7. TRANSPORT: move the camera link to UART (chosen) — I2C kept as fallback
 
-Only SDA and SCL are exposed on Grove, and **both toggle on any I2C traffic**, so no wake
-pin can distinguish a real request. Cutting power removes the question entirely: an
-unpowered camera cannot be woken by sensor traffic, and the 10 µA sleep drain goes to zero.
+**Decision (Peter, 2026-07-21): the camera moves off the shared I2C bus onto `Serial1`.**
 
-Two hardware constraints:
-1. **An nRF52 GPIO cannot power the camera** — ~14 mA drive vs 100–200 mA draw. It must
-   drive a **load switch** (P-MOSFET or switch IC), sized for inrush.
-2. **An unpowered I2C slave can clamp the shared bus.** With VCC at 0 V and SDA/SCL still
-   pulled up, current flows through the ESD/body diodes into the dead rail and can hold the
-   lines down — **breaking the BME680 and SHTC3**. That would turn a camera power fix into
-   a sensor outage and be blamed on something else. Options: separate I2C bus for the
-   camera, series resistors/isolator, or switch SDA/SCL with power.
+### Why this beats power-switching
+
+Power-switching bolts a MOSFET on to work around a bus we should not be sharing. A private
+UART means the camera was never on that bus — and it is faster and lower-power as a side
+effect. Two of the three hardware problems simply cease to exist:
+
+- **No false wakes.** The line is private, so `EXT0` on RX (start bit pulls it low) means
+  exactly one thing: "the nRF is talking to me." BME680/SHTC3 polling is invisible to it.
+- **No load switch** (a GPIO cannot source 150 mA) and **no unpowered-slave bus clamping**
+  — the failure that would have broken the sensors and been blamed on something else.
+
+### What it costs: almost nothing
+
+```c
+// Serial1 is the hardware UART on pins 15/16 (UARTE0), independent of VBUS.
+#define DBG(...) do { Serial.printf(...); Serial1.printf(...); } while (0)
+```
+- `Serial` (USB CDC) — bench debug, dead in the field (no VBUS).
+- `Serial1` — works on battery, **but only if something is physically attached to listen.
+  Nothing is attached at the garage.**
+
+So `Serial1` output in the field goes to nobody, while the enabled UARTE costs power —
+which `main.cpp:45-47` already warns about ("an enabled UARTE is NOT free... 30 uA
+target"). Bench debugging is unaffected because `Serial` over USB still carries everything.
+
+### Speed and power
+
+Current bulk read: 2.5 s for 2255 B ~= 900 B/s, throttled by 28-byte I2C pieces with settle
+delays. UART at 115200 = 11.5 KB/s -> ~0.2 s; at 460800, ~0.05 s.
+
+| | I2C (today) | UART |
+|---|---|---|
+| camera cycle | 4.2 s | **~1.9 s** |
+| at 3/day | 237 mAh/yr | **~87 mAh/yr** |
+
+### Build-flag switch, so I2C stays a working fallback
+
+`Serial1` cannot be both a debug port and the camera link, so the choice is a compile-time
+flag rather than a deletion — the I2C path keeps its UART debugging and stays buildable:
+
+```c
+#ifdef CAM_UART          // Serial1 is the camera link, not a debug port
+#  define DBG(...)  do { Serial.printf(__VA_ARGS__); } while (0)
+#else
+#  define DBG(...)  do { Serial.printf(__VA_ARGS__); Serial1.printf(__VA_ARGS__); } while (0)
+#endif
+```
+
+### Work this actually adds, stated honestly
+
+- **Framing.** I2C gives addressing and per-byte ACK for free; UART gives neither. Needs
+  length-prefixed frames with a CRC. Modest — everything is CRC'd already — but it is real
+  protocol work, not a transport swap.
+- **Wake still uses `ext0` on RX**, because UART wake is a LIGHT-sleep source on the classic
+  ESP32, not a deep-sleep one. Same mechanism as today; the difference is that the line is
+  private, which is the whole point. The first byte after wake will be lost during boot, so
+  the nRF still sends a wake preamble, waits, then sends the command.
+- **REWIRING.** Grove currently goes to the RAK's I2C pins; it must go to 15/16 instead,
+  TX<->RX crossed. G4/G13 on the camera are fine as UART pins.
+
+### I2C fallback, retained deliberately
+
+The I2C path is not deleted. It works today and is the only thing proven on air, so it
+stays behind the flag until UART has passed the same layered verification (section 10).
 
 ## 8. Counters (so a burst is visible)
 
