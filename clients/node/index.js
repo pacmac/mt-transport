@@ -160,6 +160,36 @@ class Client {
   // ---- push transfer ---------------------------------------------------------
 
   /**
+   * What does the device actually have? One `push stat`, no transfer started.
+   *
+   * Exists because defaulting to a fixed pid is wrong the moment the device
+   * captures anything: publish() SUPERSEDES, so a camera grab replaces whatever
+   * was there. A UI that hardcodes pid 1 then asks for a payload the device
+   * truthfully no longer holds.
+   *
+   * SAFE TO CALL BEFORE A TRANSFER, and only then. The no-polling rule exists
+   * because control is text at hop 3 and gets rebroadcast into the stream — that
+   * applies DURING a transfer (upst=2), which is exactly when you are not about
+   * to press Start.
+   *
+   * Deliberately does NOT substitute: it reports what is there and lets the
+   * caller decide. Silently fetching a different payload than the one asked for
+   * is a wrong answer that looks like a right one.
+   *
+   * @returns {{pid, state, chunks, crc, proto, fw, badStarts, ready}}
+   *          ready=false means nothing is published — offer Publish, not Start.
+   */
+  async pushAvailable(t) {
+    const st = await this.command(t, 'pushStat');
+    return {
+      pid: st.up, state: st.upst, chunks: st.cnt, crc: st.crc,
+      proto: st.proto, fw: st.fw, badStarts: st.bs,
+      ready: st.upst !== 0 && st.up > 0,
+    };
+  }
+  // ---- chunked payload fetch (pull) ------------------------------------
+
+  /**
    * Fetch a payload by PUSH: the device streams at its own rate and we listen
    * passively, reconciling only at the end.
    *
