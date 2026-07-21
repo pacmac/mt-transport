@@ -1,6 +1,11 @@
 ---
 task: pir-image-pipeline
-status: proposed 2026-07-21 — design agreed with Peter, NO CODE YET
+status: IN PROGRESS 2026-07-21. Queue (ESP32) built + proven via serial console.
+        §7 UART transport BUILT on both sides and LAYER-1 VERIFIED on air: the raw
+        0x55->0xAA ping returns AA (camu ping), so the wire + RX/TX orientation
+        (camera RX=13/TX=4) are correct. Framed COUNT/CAP and the full snap->xfer
+        pipeline NOT yet verified. Hardware: debug adapter removed, camera on RAK
+        Serial1 (15/16) — see device-comms.md 2026-07-21.
 priority: HIGH — this is how images actually get taken; the manual path is the test rig
 source_hash: ~
 scope:
@@ -103,6 +108,38 @@ Affordable precisely because storage is abundant: PSRAM measured at **4 MiB**
 (`psram=4194304` — note the firmware comment claiming 8 MB is wrong), ~3 MiB usable, so
 ~430 images at 7 KB. Even a week of failed uploads fits.
 
+## 4a. CORRECTION — deep sleep destroys the queue; sleep must be tiered
+
+**Found in Phase 3, not Phase 1 — my error.** §3/§4 assume the ESP32 holds images across
+sleep. It cannot, as written: the queue lives in **PSRAM** (`CAMERA_FB_IN_PSRAM`) and the
+camera sleeps via **`esp_deep_sleep_start()`**, which powers PSRAM down. Only the 8 KB+8 KB
+RTC domain survives — far too small for a 2–15 KB image. So `snap → deep sleep → xfer`
+loses the image at the sleep, and "the ESP32 is the durable store" (§4) is false for a
+store that evaporates on sleep.
+
+**Fix (Peter's call: my instinct, taken): tiered sleep.**
+
+| Queue state | Sleep mode | Current | Why |
+|---|---|---|---|
+| **empty** | deep (`esp_deep_sleep_start`) | ~10 µA | nothing to lose; PSRAM may power down |
+| **holding ≥1 image** | light (`esp_light_sleep_start`) | **UNMEASURED** (~0.8 mA datasheet-class, not measured on this bench) | RAM+PSRAM retained; execution resumes in place |
+
+Light sleep retains PSRAM and returns after the call (no reboot), so the queue survives.
+`ext0` on SCL and the G33 power-latch both work unchanged in light sleep.
+
+**The tail risk this creates, and its bound.** Light sleep is cheap for the normal case —
+the nRF uploads within minutes of the detection packet, so an image is held only briefly.
+But if the link is down, holding in light sleep for *days* at ~0.8 mA (~19 mAh/day) would
+flatten a small cell — the opposite of the power win. So: a **max-hold timeout**
+(provisional 2 h, matching the nRF-side retention deadline). When it expires the ESP32
+drops the held image and returns to deep sleep. Better to lose one image than the node.
+If the nRF still advertises it, the next `xfer` returns "no image" — already a handled
+case.
+
+**HONEST, UNMEASURED:** the ~0.8 mA light-sleep figure is datasheet-class, not measured —
+this bench has no ammeter. The max-hold value depends on it, so both are provisional until
+measured on Peter's hardware. Recorded rather than asserted.
+
 ## 5. Queue and command set
 
 ESP32 holds a ring of images in PSRAM, each with an id, length and CRC. The id **is** the
@@ -147,9 +184,26 @@ and that is not a contradiction:
 - **Automatic upload** → there is no stated intent to override. Take what the device
   advertises.
 
-## 7. TRANSPORT: move the camera link to UART (chosen) — I2C kept as fallback
+## 7. TRANSPORT: camera link on UART — BUILT, layer-1 verified 2026-07-21
 
 **Decision (Peter, 2026-07-21): the camera moves off the shared I2C bus onto `Serial1`.**
+**Status: implemented on both sides and the physical link is proven.**
+
+- **Frame:** `[0x7E][len][payload][crc16-CCITT]`, both directions. UART has no
+  addressing/ACK, so length + CRC do that job. A raw `0x55` outside a frame echoes
+  `0xAA` — the link/pin test, independent of framing.
+- **Wiring (verified):** RAK `Serial1` RX=15/TX=16 ↔ camera Grove; camera side
+  `CAM_UART_RX=13 (G13)`, `CAM_UART_TX=4 (G4)`. `camu ping` → `AA` on the first try,
+  so no swap was needed. If a future rebuild pings wrong, flip `CAM_UART_RX/TX`.
+- **Builds:** `-DCAM_UART` on both (`timercam_uart`, `rak4631_camuart`); the default
+  envs keep I2C + Serial1-debug as the fallback. `DBG` drops its Serial1 mirror under
+  the flag so debug text never clocks at the camera.
+- **Verbs:** `camu ping | count | cap` on the nRF drive the framed client.
+- **Verified 2026-07-21:** `ping`→`AA` (raw link); `count`→framed 1-byte reply;
+  `cap`→a real capture over UART, framed INFO `st=1 len=3329 crc=96D1BCEC`. So the
+  wire, the framing (len+crc16), and a capture command all work end to end.
+- **NOT yet verified:** framed `SEEK` (bulk read of image bytes), and the full
+  snap→xfer→publish→push pipeline. That is the next step.
 
 ### Why this beats power-switching
 
@@ -231,6 +285,129 @@ refused START in ninety seconds instead of being blamed on the radio.
   becomes interesting during a burst, and the counters will show whether that ever happens.
 - **Receiver-side persistence** (`PushReceiver` losing chunks on restart) — still a real
   gap, but the two-hop handshake reduces its cost from "image lost" to "re-fetch 3.5 s".
+
+## 10a. PHASE-2 DIFFS — ESP32 queue (THIS CYCLE = step 2 only)
+
+Scope this cycle: **`projects/timercam-chunk/src/main.cpp` only.** UART transport (§7,
+needs rewiring) and the nRF drain loop are separate cycles. This one is backward-compatible
+and testable over the proven I2C link.
+
+### The constraint that shapes it
+
+`cameraInit()` sets `c.fb_count = 1` (line 188). `g_fb` is a pointer into the driver's
+one-deep frame-buffer pool, and `capture()` calls `releaseFrame()` before every grab. So a
+queue **cannot** hold `camera_fb_t*` — the next capture needs that buffer back. The queue
+holds **our own PSRAM copies** of the JPEG bytes; the fb is returned immediately after copy.
+
+### Backward compatibility is mandatory
+
+`M5CameraSource` (mt-chunk, deployed, un-reflashable) speaks `INFO/CAPTURE/SEEK/SLEEP` and
+is the only proven path. It does capture → INFO → SEEK, reading the frame it just took. So:
+**`CMD_CAPTURE` pushes to the queue AND selects the new entry**, and INFO/SEEK operate on
+the *selected* entry. The existing flow then behaves exactly as today; the queue is
+invisible to it.
+
+### New state (replaces the single-frame globals)
+
+```c
+// A queue of image COPIES in PSRAM. Not camera_fb_t* — fb_count=1, so the driver
+// reclaims its one buffer on the next capture. Bounded by ENTRY COUNT, not by a
+// free-PSRAM measurement, so it cannot exhaust memory regardless of image size.
+struct CamImage {
+    uint16_t id;        // == mesh pid; 0 = empty slot
+    uint32_t len;
+    uint32_t crc;
+    uint8_t *buf;       // heap_caps_malloc(MALLOC_CAP_SPIRAM), owned by this slot
+};
+static const uint8_t CAM_QUEUE_MAX = 8;   // ~3/day with bursts; 8*15KB = 120KB of ~3MiB
+static CamImage g_q[CAM_QUEUE_MAX];
+static int      g_sel = -1;   // index of the SELECTED image, or -1
+static uint16_t g_nextId = 1; // fold of crc; see idFromCrc()
+```
+
+`g_fb`, `g_crc`, `g_status` as *frame* state go away; `g_status` stays only as the reply
+byte, computed from `g_sel`.
+
+### New commands (added; existing four unchanged in wire shape)
+
+```c
+enum Cmd : uint8_t {
+    CMD_INFO    = 0x01,  // -> status(1) len(4) crc(4) of the SELECTED image
+    CMD_CAPTURE = 0x02,  // capture, push, SELECT the new one (back-compat)
+    CMD_SEEK    = 0x03,  // read from the SELECTED image (unchanged logic)
+    CMD_SLEEP   = 0x04,
+    CMD_COUNT   = 0x05,  // -> n(1) : how many images queued
+    CMD_SELECT  = 0x06,  // id(2) -> status(1) : make that image current
+    CMD_DROP    = 0x07,  // id(2) -> n(1) : free it, reply new count
+};
+```
+
+`0x05-0x07` are unused today, so an old `M5CameraSource` never sends them and a new nRF
+client never sends them to old firmware without first checking (that check is a later
+cycle). The block stays clear of any existing value.
+
+### `capture()` → `captureToQueue()`
+
+```
+- releaseFrame(); warm-discard; g_fb = get(); crc; g_status = READY
++ warm-discard; fb = get(); if(!fb) return err
++ id = idFromCrc(crc(fb))                      // content-derived, matches camPidFromCrc
++ slot = free slot, or EVICT OLDEST (free its buf, count a drop)
++ slot.buf = heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM)
++ if(!slot.buf) { esp_camera_fb_return(fb); return err }   // do NOT crash; report
++ memcpy(slot.buf, fb->buf, fb->len); slot.len/crc/id set
++ esp_camera_fb_return(fb)                      // fb released IMMEDIATELY
++ g_sel = slot                                  // back-compat: new image is current
+```
+
+`idFromCrc` must fold the 32-bit CRC to 16 bits the SAME way `camPidFromCrc` does on the
+nRF (skip 0 and 1), so the id the camera assigns equals the mesh pid — verified by
+comparing the two implementations, not assumed.
+
+### `CMD_SEEK` — one-line change
+
+Validate and read against `g_q[g_sel]` instead of `g_fb`. The slaveWrite / FIFO staging
+(the hard-won one-read-lag fix, lines 296-303) is **untouched** — only the source pointer
+and length change from `g_fb->buf/len` to `g_q[g_sel].buf/len`.
+
+### Tiered sleep (§4a) — this cycle, because the queue is useless without it
+
+`goToSleep()` splits by queue state:
+```
++ if (queueCount() == 0) {
++     ... existing ext0 arm ...
++     esp_deep_sleep_start();              // 10 uA, PSRAM may drop; nothing to lose
++ } else {
++     ... same ext0 arm ...
++     esp_light_sleep_start();             // RAM+PSRAM retained, RETURNS here
++     // resumed by SCL activity; fall back into loop() and serve
++ }
+```
+Deep sleep still reboots into `setup()`; light sleep returns in place, so `loop()` must
+tolerate both. The **max-hold timeout** (§4a) is checked in `loop()`: if the oldest held
+image has aged past `MAX_HOLD_MS`, drop it (count it) and, if the queue empties, deep sleep.
+
+### Remove capture-on-wake (the power defect)
+
+```
+- if (cause == ESP_SLEEP_WAKEUP_EXT0) g_wantCapture = true;
++ // Do NOT capture on wake. On a SHARED bus EXT0 means only "someone talked to
++ // some device"; the nRF sends CMD_CAPTURE explicitly when it wants a frame.
++ (void)cause;
+```
+
+### Explicitly NOT touched in this file, this cycle
+
+- The `slaveWrite`/FIFO staging in `CMD_SEEK` — the race fix. Source pointer only.
+- `crc32Buf`, `cameraInit`, `goToSleep`, `PIN_BAT_HOLD` latch — unchanged.
+- Serial console — `d`/`i` gain "of the selected image" semantics for free via `g_sel`.
+
+### Not in this cycle, named so it is not forgotten
+
+- **nRF side** (`CamQueue.h`, `main.cpp`): the client that sends COUNT/SELECT/DROP and the
+  two-hop DROP-after-mesh-COMPLETE handshake. `cam grab` stays as-is until then.
+- **UART transport** (§7): needs rewiring; I2C stays the path.
+- **`up`/`upst` periodic frame** (§6): the auto-upload trigger.
 
 ## 10. Verify — layered, bottom-up
 

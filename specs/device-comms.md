@@ -142,28 +142,53 @@ Channel 0 is refused by the constructor; it must be given explicitly.
 
 ## USB ports — no ambiguity
 
-Two physical devices, three serial ports. Pin by VID:PID / serial, not by the
-`ttyACMx`/`ttyUSBx` index (those renumber).
+Pin by VID:PID / serial, **not** by the `ttyACMx`/`ttyUSBx` index — those
+renumber, and one just did (see the 2026-07-21 change below).
 
-| device | role | node path | VID:PID | chip / driver | serial | stability |
-|---|---|---|---|---|---|---|
-| **RAK4631** (nRF52) | **upload** + `Serial` USB-CDC | `/dev/ttyACM1` | `239a:8029` | Nordic/Adafruit native USB / `cdc_acm` | `B8CBA9794FF6FA1E` | **RENUMBERS on reflash** (double-tap → bootloader → app re-enumerates) |
-| **RAK4631** (nRF52) | **debug UART** — `Serial1`, MCU pins 15/16 | `/dev/ttyACM0` | `1a86:55d4` | WCH CH343/CH9102 / `cdc_acm` | `5B1F007437` | **STABLE** — survives reflash, works on battery. Use this for logs. |
-| **M5 Timer Camera X** (ESP32) | **upload + debug** (one combined port) | `/dev/ttyUSB0` | `0403:6001` | FTDI FT232 / `ftdi_sio` (Product "M5stack") | `C152DED416` | single port; `ttyUSB` index can renumber if other USB-serials attach |
+| device | role | node path (2026-07-21) | VID:PID | serial | stability |
+|---|---|---|---|---|---|
+| **RAK4631** (nRF52) | **upload** + `Serial` USB-CDC (logs) | `/dev/ttyACM0` | `239a:8029` | `B8CBA9794FF6FA1E` | **RENUMBERS on reflash**. Now the ONLY RAK port. |
+| **M5 Timer Camera X** (ESP32) | **upload + `Serial` console** (own USB) | `/dev/ttyUSB0` | Hades2001 M5stack | `5D52ADF916` | own USB, unaffected by the RAK |
 
-- All three: **115200** baud. Cam board = `m5stack-timer-cam` (ESP32, 8 MB PSRAM).
-- **Flashing the RAK:** `pio run -t upload` auto-detects `ttyACM1` (the 239a native
-  USB); it force-resets at 1200 bps into the bootloader, uploads via nrfutil, reboots.
-- **Watching RAK logs:** read `ttyACM0` (the CH343 debug UART) — `Serial1` there is
-  stable across reflashes, unlike the native USB CDC. `Serial.begin(115200)` →
-  native USB (ttyACM1, drops during flash); `Serial1.begin(115200)` → ttyACM0.
-  ```bash
-  stty -F /dev/ttyACM0 115200 raw -echo && timeout 30 cat /dev/ttyACM0 | tr -d '\r'
-  ```
-  Boot logs flush in the first ~2–3 s after reset, so attach before/at reset to
-  catch `setup()`/`mesh.begin`; otherwise the line is quiet between heartbeats.
-- The remote unit is never on USB here — by definition only the bench unit is
-  attached (memory `bench-unit-is-the-flash-target`).
+### CHANGE 2026-07-21 — debug adapter removed, camera moved to UART
+
+The separate **WCH CH343 debug-UART→USB adapter** (`1a86:55d4`, previously
+`/dev/ttyACM0`) that tapped the RAK's `Serial1` (MCU pins 15/16) **has been removed
+from the bench.** Consequences, all verified this session:
+
+- **The RAK native USB renumbered `ttyACM1` → `ttyACM0`** (nothing else holds ACM0
+  now). Flash and logs are both `ttyACM0`. A stale "flash on ttyACM1" assumption
+  cost a failed upload before I checked `by-id`.
+- **`Serial1` (pins 15/16) is no longer a debug port — the M5 camera is wired to
+  it** (Grove G4/G13 ↔ RAK 15/16). In `CAM_UART` builds `Serial1` is the **camera
+  link**; `DBG` no longer mirrors there (else debug text clocks at the camera).
+  Do NOT read `Serial1` as a log source.
+- **RAK logs are now USB-only** (`Serial`, `ttyACM0`), which **drops during flash**
+  and the bootloader window. There is no longer a battery-independent, reflash-stable
+  log tap — the memory `rak-debug-uart-is-stable` is now WRONG and superseded. If a
+  stable tap is needed again, add a CH343 on spare pins, NOT on 15/16.
+
+- All ports **115200** baud. Cam board = `m5stack-timer-cam` (ESP32; `psram=4194304`
+  = **4 MiB** measured, not the 8 MB sometimes quoted).
+- **Flash the RAK:** `pio run -e rak4631_camuart -t upload --upload-port /dev/ttyACM0`
+  (auto-detect also works). 1200 bps touch → bootloader → nrfutil → reboot; the port
+  renumbers mid-cycle and pio waits it out.
+- **Flash the camera:** `pio run -e timercam_uart -t upload` over `ttyUSB0` (own USB —
+  the adapter removal did not affect this).
+- **Watch either log:** opening the port may reset the MCU via DTR/RTS; open with
+  DTR/RTS **deasserted** to observe without resetting.
+- The remote unit is never on USB here — only the bench unit is attached (memory
+  `bench-unit-is-the-flash-target`).
+
+### Camera link (spec `pir-image-pipeline.md` §7)
+
+- **Transport:** UART, RAK `Serial1` (15/16) ↔ camera Grove **G4/G13**, 115200,
+  framed `[7E][len][payload][crc16-CCITT]`. Verified TX/RX orientation: camera
+  `CAM_UART_RX=13, TX=4`; raw `0x55`→`0xAA` ping returns `AA` (`camu ping`).
+- **Was I2C** (camera as slave 0x62 on the same Grove pins). The I2C path is retained
+  as a build fallback (default `timercam` / `rak4631` envs) but the bench is now wired
+  for UART, so I2C cannot reach the camera until rewired back.
+- **nRF verbs (CAM_UART build):** `camu ping` (raw link), `camu count`, `camu cap`.
 
 ## Hard rules (do not violate)
 
