@@ -14,7 +14,7 @@ mesh.receive(rxWindowMs, pkt);   // bounded Class-A style listen window
 No NodeDB. No router. No power state machine. No filesystem. No BLE stack.
 **No opinion about when your CPU sleeps** — that belongs to your application.
 
-## Status: TX + RX + command handshakes, proven on air (0.3.1)
+## Status: TX + RX + command handshakes, proven on air (0.4.x)
 
 The spike gate (`docs/spike.md`) passed 2026-07-17; the same day the library
 grew `receive()` (filtered, decrypted, deduped), protocol ACKs, same-id
@@ -25,6 +25,16 @@ in a live field deployment at 2.3 km. Known limitation: Meshtastic 2.8
 rejects PSK-encrypted direct messages ("legacy DM") — commanding rides on
 broadcasts within a private channel until X25519 PKI lands. The API will
 still move; SemVer is honest.
+
+**Airtime accounting (0.4.x)** is ported from Meshtastic's `AirTime`: channel
+and TX occupancy accumulate into a **fixed 60 s rolling window** (a ring of
+6 × 10 s buckets, rotated on `millis()` on both read and write), exposed as
+`channelUtilizationPercent()` / `utilizationTxPercent()` — bounded 0..100 by
+construction. That utilisation sizes the CSMA contention window in
+`getTxDelayMsec()`, which is a scheduled `millis()` offset, never a blocking
+`delay()`. The earlier reader-reset API (`airWindowMs()` + `resetAirWindow()`)
+is **gone**: it made the denominator "time since the caller last read", which
+produced meaningless ratios and mis-sized the backoff.
 
 ```cpp
 #include <MeshtasticTransport.h>
