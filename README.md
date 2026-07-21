@@ -26,11 +26,15 @@ rejects PSK-encrypted direct messages ("legacy DM") — commanding rides on
 broadcasts within a private channel until X25519 PKI lands. The API will
 still move; SemVer is honest.
 
-**Airtime accounting (0.4.x)** is ported from Meshtastic's `AirTime`: channel
-and TX occupancy accumulate into a **fixed 60 s rolling window** (a ring of
-6 × 10 s buckets, rotated on `millis()` on both read and write), exposed as
-`channelUtilizationPercent()` / `utilizationTxPercent()` — bounded 0..100 by
-construction. That utilisation sizes the CSMA contention window in
+**Airtime accounting (0.4.x)** is ported from Meshtastic's `AirTime`: occupancy
+accumulates into **fixed rolling windows** held as rings of buckets, rotated on
+`millis()` on both read and write (buckets skipped while the radio was quiet are
+zeroed, so stale airtime cannot inflate the window). The two windows are
+deliberately different: **channel** utilisation uses **6 × 10 s = 60 s**, short
+enough to size the contention backoff responsively, while **TX** utilisation uses
+**60 × 1 min = 1 h**, the span that matters for duty cycle. Exposed as
+`channelUtilizationPercent()` / `utilizationTxPercent()` — each divides by its own
+fixed denominator and is bounded 0..100 by construction. That utilisation sizes the CSMA contention window in
 `getTxDelayMsec()`, which is a scheduled `millis()` offset, never a blocking
 `delay()`. The earlier reader-reset API (`airWindowMs()` + `resetAirWindow()`)
 is **gone**: it made the denominator "time since the caller last read", which
