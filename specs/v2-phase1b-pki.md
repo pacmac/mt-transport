@@ -66,16 +66,19 @@ The receiver identifies PKC by `to == me && channel == 0`.
 - **D1b.6 Payload budget shrinks by 12 bytes** on PKI DMs (auth 8 + extraNonce 4). `MESH_PAYLOAD_MAX`
   231 → **219 effective** for PKI. The chunk layer must not be handed a PKI DM sized for 231.
 
-## ⚠️ OPEN QUESTION FOR PETER — the channel-0 rule
-PKC **requires the header `channel` byte to be 0**. That is the protocol's PKC marker, and it is
-NOT the same thing as transmitting on the PRIMARY channel (channel *index* 0) — the byte is
-normally a channel *hash*, and PKC replaces it with a literal 0.
+## Channel 0 — RESOLVED (Peter, 2026-07-22)
+PKC **requires the header `channel` byte to be 0**. Asked rather than assumed, and the rule turned
+out to be narrower than its wording:
 
-But the standing rule here is absolute: **"NEVER transmit on channel 0 (PRIMARY)"**. I am not
-going to decide that this is an exemption on my own — absolute instructions have no asterisk.
-**Peter: confirm that setting the PKC `channel=0` marker on directed PKI packets is acceptable**,
-given it is a crypto marker rather than the primary broadcast channel. Everything else here is
-ready to build; this is the only blocker.
+> "DMs on channel 0 is fine, what I am banning is flooding the public mesh with messages."
+
+So the ban is on **BROADCASTS** into the public/primary mesh, not on the channel byte itself. A
+PKI DM is directed at exactly one node and floods nothing, so `channel = 0` on a **directed** send
+is permitted. **This is not a licence to broadcast on channel 0 — that stays banned.**
+
+**Enforce it in code:** the PKI send path must assert `to != BROADCAST_ADDR`. A PKC broadcast is
+both meaningless (no recipient key) and a violation of the rule, so it must be impossible to
+express, not merely discouraged.
 
 ## Tests
 - **Offline (`offline_pki_vectors.cpp`, host):** known-answer vectors — fixed keypair + packetId +
