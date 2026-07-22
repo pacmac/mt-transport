@@ -175,8 +175,36 @@ from the bench.** Consequences, all verified this session:
   renumbers mid-cycle and pio waits it out.
 - **Flash the camera:** `pio run -e timercam_uart -t upload` over `ttyUSB0` (own USB —
   the adapter removal did not affect this).
-- **Watch either log:** opening the port may reset the MCU via DTR/RTS; open with
-  DTR/RTS **deasserted** to observe without resetting.
+- **Watching a log — the two boards need OPPOSITE handling. Get this wrong and you
+  get silence that looks like a dead board.**
+  - **RAK4631 (`ttyACM0`) — DTR must be ASSERTED.** `Serial` is TinyUSB **USB CDC**,
+    and CDC only emits once the host raises DTR; the firmware's own comment says so
+    (`main.cpp` setup: *"Serial is USB CDC and its operator bool() is DTR-based"*).
+    **`cat /dev/ttyACM0` does NOT raise DTR — it returns absolutely nothing**, even
+    while the device is alive and transmitting on air. Flashing does not need DTR
+    either, so uploads succeed while reads stay mute: a genuinely misleading pair.
+    Working headless recipe:
+    ```bash
+    /usr/share/pac/py/bin/python - <<'PY'
+    import serial, time
+    s = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
+    s.dtr = True; s.rts = True          # <-- the whole trick
+    time.sleep(0.3); s.reset_input_buffer()
+    end = time.time() + 30
+    while time.time() < end:
+        ln = s.readline()
+        if ln: print(ln.decode('utf-8','replace').rstrip(), flush=True)
+    PY
+    ```
+    `pio device monitor` also asserts DTR but requires a TTY, so it dies headless with
+    a `start_terminal` traceback.
+  - **M5 camera (`ttyUSB0`, ESP32) — DTR/RTS deasserted**, because there they are
+    wired to reset/boot and asserting them RESETS the board.
+- **When RAK serial is silent, check in this order** (both causes were hit on
+  2026-07-22): (1) a leaked/orphaned reader still holding the port — look for
+  `ttyACM0` in `/proc/*/fd`; (2) DTR not asserted, per above. Silence is **not**
+  evidence the board is dead — confirm liveness positively via the gateway's
+  `last_heard`, not by absence of output.
 - The remote unit is never on USB here — only the bench unit is attached (memory
   `bench-unit-is-the-flash-target`).
 
