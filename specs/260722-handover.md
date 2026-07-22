@@ -14,6 +14,16 @@ everything. Assume he remembers only fragments — this document, not his recall
 
 Read §1 before you touch hardware. Read §9 before you repeat anything I said.
 
+> **AMENDED 2026-07-22 (late).** A successor session audited this document against the trees and
+> found real errors — see `specs/260722-handover-qa.md`, which carries the findings and my
+> responses. Corrections are folded in below and marked **[AMENDED]**. The two that change what
+> you should do next:
+> - **`publishJson` is NOT in HEAD** — commit `f98cd7a` deleted it (§10 #6, phase table).
+> - **The §7 "decisive test" is NOT runnable as written** — the `pkiRx*` counters are uncommitted
+>   and nothing reports them (§7).
+>
+> Read the Q&A alongside this. Where they disagree, **the Q&A wins** — it was verified later.
+
 ---
 
 ## 1. HAZARDS — every one of these cost real time today
@@ -199,7 +209,7 @@ PSK-DM finding landed. Branch `v2` in both repos; `main` untouched everywhere.
 | 0 — freeze contract | `v2-transport` | DONE (`af1626a`) |
 | 1 — reliability (want_ack + retransmit) | `v2-phase1-reliability` | Both ends landed; **step 5 (on-air proof) NOT done** |
 | 1b — PKI/PKC DMs | `v2-phase1b-pki` | Crypto done + KAT-verified; **step 7 (a PKC DM accepted end-to-end) NOT done** |
-| 2 — chunk everything (ptype 4) | `v2-phase2-chunk-everything` | ptype in codec + firmware; conformance tests pass |
+| 2 — chunk everything (ptype 4) | `v2-phase2-chunk-everything` | **[AMENDED]** ptype in the node codec + conformance tests pass. **The FIRMWARE end is NOT in HEAD** — `publishJson()` was added by `0d3483c` and deleted by `f98cd7a`. Phase 2 firmware exists only in git history. |
 | 3 — one port, DM by nodeNum, retire `@xxxx` | `v2-phase3-one-port` | **BREAKING. Not started.** Blocked on node-dash answers via xsession `[v2-phase3-breaking]` |
 | 4 — remove dead code | `v2-phase4-remove-dead-code` | **BREAKING. Not started.** |
 | 5 — conformance + field cutover | `v2-phase5-conformance-cutover` | **HUMAN-GATED. Not started.** |
@@ -282,12 +292,21 @@ channel we don't decrypt, or not broadcast at all. I watched the bench's serial 
 Peter's rename and saw traffic from the field unit but **no port-4 packet from TA2m**. One sample,
 inconclusive. I had *started* checking whether our channel-hash filter (`MeshtasticTransport.cpp:479`,
 `if (h.channel != _hash)`) could be discarding NodeInfo broadcast on TA2m's *primary* channel while
-the bench decrypts only the private channel — **this line of investigation is unfinished and is the
-most promising lead.** Peter's position, which deserves weight: *"the issue is with our code"*.
+the bench decrypts only the private channel — **this line of investigation is unfinished.**
+**[AMENDED]** I called it "the most promising lead" on one 60 s capture — over-weighted. It can
+explain at most the BENCH half: the OMNI is stock 2.8 with no such filter, yet holds no user
+record for TA2m while demonstrably hearing it. **Open input nobody has established: which channel
+is TA2m's primary?** Peter can read the channel order off the phone in seconds, and the lead's
+plausibility depends on it. Peter's position deserves weight: *"the issue is with our code"*.
 
-**The decisive test, not yet run:** have Peter send one DM from TA2m to the bench while watching
-the bench's serial. The transport counts outcomes separately — `pkiRxOk`, `pkiRxNoKey`,
-`pkiRxAuthFail` — so it discriminates in one shot:
+**The decisive test — [AMENDED] BLOCKED, not merely "not yet run".** The `pkiRxOk`/`pkiRxNoKey`/
+`pkiRxAuthFail` counters exist ONLY as uncommitted working-tree edits in mt-transport, and
+**nothing in the firmware reports them** (zero references in `pac-garage-alarm/src/`). A
+NoKey/AuthFail drop happens inside `handleRxDone()` before the app sees the packet, so on the
+flashed build "arrived but rejected" and "never arrived" are IDENTICAL SILENCE.
+Prerequisites, in order: adopt/commit the transport diff → surface the counters (the HB line is
+the natural place) → bump `FW_VERSION` → flash → then ask Peter. Once runnable it discriminates
+in one shot:
 - `RX:` + `pkiRxOk` → arrived and decrypted
 - `RX:` + `pkiRxAuthFail` → arrived, key mismatch
 - `RX:` + `pkiRxNoKey` → arrived, we hold no key for TA2m
@@ -369,9 +388,12 @@ it completed a full `cam grab` the same evening.
 
 ## 10. OPEN PROBLEMS, ranked
 
-1. **Bench replies are not reaching the gateway.** Last reply stored: **19:08:45**. Since then the
-   bench receives commands (proven on serial) and `txfs=0`, but `nodes`/`ping`/`status` replies do
-   not arrive. **UNRESOLVED, and the biggest open item.** Note the reply path sends a broadcast
+1. **Bench replies are not reaching the gateway.** Last reply stored: **19:08:45**; **[AMENDED]
+   last checked ~20:00, and it may be stale rather than live** — the 19:59:27 watchdog reset sits
+   inside the window as a confound. Since then the bench receives commands (proven on serial) and
+   `txfs=0`, but `nodes`/`ping`/`status` replies do not arrive. **UNRESOLVED, and the biggest open
+   item.** Settle it with ONE command→reply cycle observed at BOTH ends (bench serial + gateway
+   store); it must be a normal broadcast reply, since the store cannot show DMs (§5). Note the reply path sends a broadcast
    **exactly once** — `main.cpp`: *"Send a command reply ONCE — the Meshtastic model. MT never
    origin-retransmits a broadcast"* — so a lost transmission is simply gone.
 2. **Watchdog resets.** The bench's persisted boot log reads `boots=40 (por=0 pin=1 DOG=17 soft=22
@@ -385,8 +407,12 @@ it completed a full `cam grab` the same evening.
 5. **`FW_VERSION` was not bumped** for the heartbeat build — still `2-260722-10` while the flashed
    build differs. Violates the standing rule to bump the instant the bench build diverges. Fix
    before anything else is flashed, or the dashboard lies about what is on air.
-6. **Verify `publishJson` (`0d3483c`) is present in the working tree** — it was reverted out during
-   the bootloader recovery this morning; the commit exists and the tree is clean, but confirm.
+6. **[AMENDED] `publishJson` is GONE from HEAD — restore it.** Not a checkbox: verified absent
+   (`git grep publishJson HEAD` → no matches). `0d3483c` added it; **`f98cd7a` deleted all four
+   hunks** — and `f98cd7a`'s message mentions only two config defects, so the removal was an
+   out-of-scope deletion smuggled into an unrelated commit. Re-applying the hunks is real work
+   needing its own /idiot task+spec. **Corollary: audit other commits from that afternoon** —
+   compare `git show --stat` against each message before trusting it.
 7. **Key re-learning has no trigger** (§6.3).
 8. Parked in `bugs-enhancements`: `camu` verbs block `loop()`; the camera's chunk-count log line
    uses 224 where the push path uses 226 (cosmetic — `mt-chunk-push` `CHUNK_DATA_MAX` is 226, so
