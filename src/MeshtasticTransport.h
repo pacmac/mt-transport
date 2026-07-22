@@ -151,6 +151,11 @@ public:
     void setAckTimeoutMs(uint32_t ms) { _ackTimeoutMs = ms; }
     void setAckMaxAttempts(uint8_t n) { _ackMaxAttempts = n ? n : 1; }
 
+    // TX-path trace hook (diagnostics). NULL by default; the library never logs on
+    // its own. Every call site is guarded, so with no hook registered behaviour is
+    // byte-identical.
+    void setTxTrace(void (*fn)(const char *ev, uint32_t a, uint32_t b)) { _txTrace = fn; }
+
     // PKC RECEIVE diagnostics. A PKC packet that cannot be decrypted is dropped
     // inside handleRxDone(), before the application sees anything — so a REJECTED DM
     // looks exactly like one that never arrived. These make the two distinguishable,
@@ -297,6 +302,9 @@ private:
     uint32_t _ackRetransmits = 0;     // cumulative
     uint32_t _ackFailTotal = 0;       // cumulative (exhausted or superseded)
     uint32_t _pkiRxOk = 0, _pkiRxNoKey = 0, _pkiRxAuthFail = 0, _pkiLastFrom = 0;
+
+    void (*_txTrace)(const char *, uint32_t, uint32_t) = nullptr;
+    void trace(const char *ev, uint32_t a, uint32_t b) { if (_txTrace) _txTrace(ev, a, b); }
 
     bool _rxActive = false;       // radio currently in RX (survives short polls)
 

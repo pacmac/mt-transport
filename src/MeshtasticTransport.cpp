@@ -248,6 +248,7 @@ bool MeshtasticTransport::enqueueFrame(const uint8_t *frame, size_t len)
     _txq[tail].txAfter = millis() + after;
     _txq[tail].attempts = 0;
     _txCount++;
+    trace("enq", len, _txCount);
     return true;
 }
 
@@ -363,7 +364,10 @@ void MeshtasticTransport::startSending()
     _rxActive = false;
     memcpy(_frame, it.frame, it.len); // introspection: the frame going on air
     _frameLen = it.len;
-    if (_radio->startTransmit(it.frame, it.len) != RADIOLIB_ERR_NONE) {
+    trace("txgo", it.len, 0);
+    int16_t st = _radio->startTransmit(it.frame, it.len);
+    if (st != RADIOLIB_ERR_NONE) {
+        trace("txerr", (uint32_t)st, 0);
         _txFailStreak++;
         _txDropped++; // queued, never went out — otherwise invisible to the caller
         _txCount--; _txHead = (_txHead + 1) % TXQ_N; // drop the unsendable frame
@@ -395,12 +399,15 @@ void MeshtasticTransport::driveTx()
         if ((int32_t)(now - it.txAfter) < 0)
             break; // scheduled for later — come back next pass
         if (it.attempts >= 8) {            // fail-open: 8 busy scans, send anyway
+            trace("failopen", it.attempts, 0);
             startSending();
         } else if (_radio->startChannelScan() == RADIOLIB_ERR_NONE) {
+            trace("cad", it.len, it.attempts);
             _txState = TX_SCANNING;        // CAD result arrives as a DIO1 interrupt
             _txStateMs = now;
             _rxActive = false;
         } else {
+            trace("caderr", 0, 0);
             startSending();                // CAD could not start — just send
         }
         break;
@@ -415,6 +422,7 @@ void MeshtasticTransport::driveTx()
         // Safety net: if TX-done is missed, force-finish after airtime+margin so
         // one frame can never stall the queue forever.
         if ((int32_t)(now - _txStateMs) > 5000) {
+            trace("txto", 0, 0);
             _radio->finishTransmit();
             _txFailStreak++;
             _txDropped++; // TX-done never arrived; the frame is abandoned here
@@ -568,6 +576,7 @@ void MeshtasticTransport::service()
 
         if (_txState == TX_SENDING && (irq & RADIOLIB_SX126X_IRQ_TX_DONE)) {
             _radio->finishTransmit();                     // clears IRQ, chip to standby
+            trace("txdone", 0, 0);
             _txFailStreak = 0;
             _txCount--; _txHead = (_txHead + 1) % TXQ_N;  // sent — drop it
             _txState = TX_IDLE;
@@ -579,6 +588,7 @@ void MeshtasticTransport::service()
                 // retry the same frame later. Live listen with zero blocking.
                 _csmaDeferrals++;
                 _txq[_txHead].attempts++;
+                trace("cadbusy", _txq[_txHead].attempts, 0);
                 _txq[_txHead].txAfter = millis() + getTxDelayMsec(); // re-roll the window
                 _txState = TX_WAITING;
                 armRx();
