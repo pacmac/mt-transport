@@ -11,6 +11,9 @@ scope:
   - src/MeshtasticTransport.cpp    # want_ack flag + transport-owned no-ACK retransmit driver
   - test/offline_wire_flags.cpp    # NEW — deterministic host C++ check of the want_ack bit layout
   - clients/node/test/onair-reliability.js    # NEW — bench: read ack counters, prove no unrecovered send
+  # firmware end (sibling repo, same phase — "lands both ends"):
+  - ../pac-garage-alarm/src/main.cpp  # sendText/sendReply gain to+wantAck; comfort replies (ping/status)
+                                      # become DM+want_ack; ack counters exposed in the debug frame
 ---
 
 # v2 Phase 1 — reliability layer (want_ack + transport-owned retransmit + DM addressing)

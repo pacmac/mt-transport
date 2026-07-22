@@ -66,24 +66,32 @@ async function sendCmd(verb) {
   return j.id >>> 0;
 }
 
-// Read the device ack counters via `debug`. Correlate the reply by reply_id and
-// pull the ack.* fields. Returns null if the reply never arrives or lacks them.
+// Read the device ack counters (ackr/ackf) out of the debug frame.
+//
+// NOTE ON CORRELATION: `debug` does NOT produce a text reply — broadcastDebug()
+// sends the debug JSON on PAC_ALARM_APP (260) as a BROADCAST with no request_id,
+// so there is no reply_id to correlate on. We therefore match by CONTENT
+// (type=="debug" carrying ackr/ackf) among messages newer than the baseline, and
+// take the newest. If the gateway does not surface port-260 payloads in
+// /messages, read them from node-dash's 260 feed instead (lib/index.js parse260)
+// — do not "fix" this by matching a text reply that the firmware never sends.
 async function readAckCounters() {
   const baseline = (await getMessages()).reduce((m, x) => Math.max(m, x.id || 0), 0);
-  const id = await sendCmd('debug');
+  await sendCmd('debug');
   const deadline = Date.now() + TIMEOUT;
   while (Date.now() < deadline) {
     const msgs = await getMessages();
+    let best = null;
     for (const m of msgs) {
       if ((m.id || 0) <= baseline) continue;
-      if (((m.reply_id) >>> 0) !== id) continue;
       try {
         const j = JSON.parse(m.text);
-        // Firmware-end (Phase 1) surfaces these under the debug reply.
-        if (j.ackRt != null || j.ackFail != null)
-          return { ackRetransmits: j.ackRt >>> 0, ackFailTotal: j.ackFail >>> 0, raw: j };
+        if (j.type === 'debug' && (j.ackr != null || j.ackf != null))
+          if (!best || (m.id || 0) > best.id) best = { id: m.id || 0, j };
       } catch { /* not the debug json */ }
     }
+    if (best)
+      return { ackRetransmits: best.j.ackr >>> 0, ackFailTotal: best.j.ackf >>> 0, raw: best.j };
     await sleep(200);
   }
   return null;
@@ -100,8 +108,9 @@ async function readAckCounters() {
 
   const before = await readAckCounters();
   if (!before) {
-    console.error('FAIL: could not read ack counters via debug. Is the Phase 1 firmware-end '
-      + '(ackRt/ackFail in the debug reply) flashed on the bench unit? Aborting — not faking a pass.');
+    console.error('FAIL: could not read ack counters from the debug frame. Is the Phase 1 '
+      + 'firmware-end (ackr/ackf in broadcastDebug) flashed on the bench unit, and does the '
+      + 'gateway surface port-260 payloads? Aborting — not faking a pass.');
     process.exit(2);
   }
   console.log(`baseline: ackRetransmits=${before.ackRetransmits} ackFailTotal=${before.ackFailTotal}`);
