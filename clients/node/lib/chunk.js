@@ -27,7 +27,11 @@ const CHUNK_DATA_MAX   = MESH_PAYLOAD_MAX - CHUNK_HEADER_LEN; // 224
 const PULL_BATCH_MAX   = 16;
 
 const MSG = { CHUNK: 0x01, PULL: 0x02, MANIFEST: 0x03, ERR: 0x04, GETMANIFEST: 0x05, BUSY: 0x06 };
-const PT  = { SCHEMA: 1, IMAGE: 2, LOG: 3 };
+// ptype registry — MUST match mylibs/mt-chunk/src/MtChunk.h PayloadType.
+// JSON (4) is v2's ONE generic type for every machine-lane JSON response
+// (config, schema, debug, calc, env); the JSON's own `t` field names which one,
+// so consumers route on `t`, not on ptype. SCHEMA (1) is superseded by it.
+const PT  = { SCHEMA: 1, IMAGE: 2, LOG: 3, JSON: 4 };
 const ERR = { GONE: 1, BADRANGE: 2, NOSUCH: 3 };
 
 // Node's zlib.crc32 is IEEE 802.3 reflected — the same value mtchunk::crc32 and
