@@ -408,14 +408,27 @@ void MeshtasticTransport::handleRxDone()
         return; // wrong PSK garbage decodes to noise; protobuf catches it
 
     // v2 reliability: a ROUTING_APP packet whose request_id matches our outstanding
-    // reliable send IS the ACK — clear the pending slot so serviceAck() stops
+    // reliable send answers it — clear the pending slot so serviceAck() stops
     // retransmitting. Done before the dedupe check so the FIRST sighting clears it
-    // (a mesh-duplicated ACK arriving later is then a harmless no-op). The packet is
-    // still delivered to poll() below; the app may want to observe the ACK.
+    // (a mesh-duplicated reply arriving later is then a harmless no-op). The packet is
+    // still delivered to poll() below; the app may want to observe it.
+    //
+    // ONLY error_reason == NONE is an ACK. A Routing NAK carries our request_id too —
+    // a Meshtastic 2.8 gateway refusing a PSK-encrypted DM ("legacy DM") answers
+    // exactly that way. Counting a NAK as success would mark an UNDELIVERED reply as
+    // delivered and stop the retransmits, which is the precise failure this layer
+    // exists to detect. Verified on air 2026-07-22: the gateway never surfaced the DM.
     if (_pendingId != 0 && data.portnum == meshtastic_PortNum_ROUTING_APP &&
         data.request_id == _pendingId) {
+        meshtastic_Routing r = meshtastic_Routing_init_zero;
+        pb_istream_t rs = pb_istream_from_buffer(data.payload.bytes, data.payload.size);
+        const bool acked = pb_decode(&rs, meshtastic_Routing_fields, &r) &&
+                           r.which_variant == meshtastic_Routing_error_reason_tag &&
+                           r.error_reason == meshtastic_Routing_Error_NONE;
         _pendingId = 0;
         _pendingLen = 0;
+        if (!acked)
+            _ackFailTotal++; // delivery REFUSED — never confirmed
     }
 
     if (isDuplicate(h.from, h.id))

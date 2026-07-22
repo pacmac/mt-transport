@@ -11,9 +11,12 @@ scope:
   - src/MeshtasticTransport.cpp    # want_ack flag + transport-owned no-ACK retransmit driver
   - test/offline_wire_flags.cpp    # NEW — deterministic host C++ check of the want_ack bit layout
   - clients/node/test/onair-reliability.js    # NEW — bench: read ack counters, prove no unrecovered send
+  - library.json                   # version bump 0.4.0 -> 0.5.0 (lib self-sufficiency, see below)
   # firmware end (sibling repo, same phase — "lands both ends"):
   - ../pac-garage-alarm/src/main.cpp  # sendText/sendReply gain to+wantAck; comfort replies (ping/status)
                                       # become DM+want_ack; ack counters exposed in the debug frame
+                                      # + FW_VERSION bump (bench build now diverges from deployed)
+  - ../pac-garage-alarm/platformio.ini # declare the mt-transport >= 0.5.0 requirement explicitly
 ---
 
 # v2 Phase 1 — reliability layer (want_ack + transport-owned retransmit + DM addressing)
@@ -86,6 +89,83 @@ want_ack is never set — and every reply is a broadcast, so loss is silent and 
 - A C++ compile (`pio run -e rak4631` in pac-garage-alarm, which symlinks this lib) is the
   minimum gate before any on-air claim — **done: clean, RAM 22.3%, Flash 25.5% (+928 B).**
   Offline host-check **done: PASS** (output above).
+
+## ON-AIR RESULT 2026-07-22 — the DM design is dead; two real defects found
+
+Ran on the bench (`!8cee336b`, fw `2-260722-1`) with the live rig. **The comfort-DM half of this
+phase does not work and has been reverted.** Both findings below were caught by *observing the
+device*, not by reasoning.
+
+**1. Meshtastic 2.8 rejects PSK-encrypted DMs — the comfort lane cannot be a DM.**
+`onair-ping` scored **0/3**. Device serial proved the reply was built and sent correctly:
+`to=0x2687afb1` (gateway), flags **`0x6B`** — the exact reliable value `offline_wire_flags.cpp`
+predicts — and `REPLY dm … OK`. But mesh-gw's **raw `/events` stream saw nothing whatsoever**
+from the bench across 30 s, while logging other nodes throughout. The same build reverted to a
+broadcast reply scored **3/3**. `specs/device-comms.md:76` already documented 2.8's "legacy DM"
+rejection for commands; it applies to replies too. **I should have read that before designing
+this lane.** APIV2 amended to v2.1 §5.1; comfort replies are broadcast again.
+
+**Architectural consequence:** Meshtastic-level `want_ack` cannot make **gateway-facing** traffic
+reliable at all. Reliability must be application-level ARQ — the machine lane's pull + re-PULL
+repair. This makes Phase 2 the load-bearing reliability work, not a uniformity exercise. The
+transport's want_ack/retransmit stays in the lib: valid **device↔device between our own units**,
+or later over PKI DMs.
+
+**2. ACK/NAK bug in this phase's own code (fixed).** `handleRxDone()` treated ANY `ROUTING_APP`
+packet with a matching `request_id` as an ACK. A **NAK carries the same `request_id`** — which is
+likely exactly what the 2.8 gateway returned when refusing the DM (a port-5 packet did come back).
+The layer would have cleared the pending slot, stopped retransmitting, and reported an
+UNDELIVERED reply as delivered — the precise failure it exists to detect. Now requires
+`Routing.error_reason == NONE`; anything else counts in `ackFailTotal`.
+
+**Still unproven:** the retransmit path has never fired successfully end-to-end, because there is
+no longer a gateway-facing link that can ACK. Proving it needs two of our own units, or PKI DMs.
+
+## Library self-sufficiency (PRINCIPLE — Peter, 2026-07-22)
+
+**Our libs must be self-sufficient.** A consumer imports a lib and it works; it must not depend
+on ambient state like "which branch the sibling checkout is on". This applies to `mt-transport`
+(C++), `mylibs/mt-chunk`, and `clients/node` alike.
+
+**The concrete hazard this phase exposed.** `pac-garage-alarm/platformio.ini` resolves the lib as
+`lib_deps = symlink://../mt-transport`, so the firmware builds against **whatever branch that
+sibling working tree is checked out on** — an implicit, invisible dependency. Phase 1 made it
+bite: firmware `v2` calls `send(..., wantAck)`, which exists only on lib branch `v2`. Build the
+same firmware commit while mt-transport sits on `main` and it **fails to compile**, with nothing
+in either repo saying why.
+
+**Rules that follow:**
+1. **The lib declares its version.** `library.json` version is bumped whenever the public API
+   changes — Phase 1 bumps `0.4.0 -> 0.5.0` (additive: `send()` gained `wantAck`, plus the
+   reliable-send API). A consumer can then state what it needs instead of inferring it.
+2. **API changes stay additive where possible.** Phase 1 appended a defaulted param rather than
+   inserting one, so every v1 caller still compiles against the v2 lib. Backward compatibility is
+   what lets the lib be self-sufficient; the *forward* dependency (firmware v2 needs lib >= 0.5.0)
+   is the one that must be declared, not assumed.
+3. **Release builds pin, dev builds symlink.** platformio.ini already documents
+   "release: pin a git tag instead" — that is the mechanism; the symlink is a dev convenience and
+   must never be what a reproducible build relies on.
+4. **Same rule in Phase 2** for `mylibs/mt-chunk` when ptype `JSON=4` is added: bump its version,
+   and keep `clients/node`'s `mtTransport.pushProtoVersion` in step with the C++ constant.
+
+## FW_VERSION convention (Peter, 2026-07-22)
+
+**Format: `<api>-<YYMMDD>-<n>`** — e.g. `2-260722-1`. The leading field is the **protocol
+generation**, so a version string answers "which wire contract does this build speak?"
+(`2` = APIV2, `docs/v2/APIV2.md`). YYMMDD is the build date, `n` the increment within the day.
+This matters because FW_VERSION is appended to `long_name` and is the ONLY way a phone surfaces
+a REMOTE node's build — a v1 and a v2 unit must be distinguishable at a glance.
+
+**Length budget:** `validateName()` caps `LONG_NAME_MAX` at 24 and `long_name` is 40, so
+`" " + FW_VERSION` must fit — **FW_VERSION <= 14 chars**. `2-260722-1` is 10, leaving room for
+3-digit increments. Exceeding it silently pushes the version out of `long_name` (the blindness
+that made the 2026-07-18 investigation expensive).
+
+**No automation exists today.** pac-garage-alarm registers **no `extra_scripts`** — FW_VERSION is
+a hand-edited constant (`src/main.cpp:92`). The PlatformIO version hooks live in the *mt-radar*
+project (`bin/platformio-custom.py`, `bin/platformio-pre.py`), not here. Automating this would
+mean ADDING a `pre:` hook to pac-garage-alarm that rewrites the constant (and it must respect the
+14-char budget above) — a separate task, not an amendment to something existing.
 
 ## Out of scope
 Chunk-everything (Phase 2), port collapse / @xxxx retire (Phase 3), dead-code removal (Phase 4),

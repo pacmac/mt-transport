@@ -29,10 +29,16 @@ Two structural faults fall out of that:
 ## The v2 model — two lanes
 
 ### 1. Comfort lane (human-facing)
-`ping` and `status` stay **plain text**, but are sent as **direct messages**
-(`to = rx.from`, `want_ack`). One round-trip, human-readable in a phone/chat client, and now
-**acked + retried** on loss. (`env` is *not* comfort — its reading is structured data, so it
-rides the machine lane.)
+`ping` and `status` stay **plain text, broadcast**. (`env` is *not* comfort — its reading is
+structured data, so it rides the machine lane.)
+
+> **Amended 2026-07-22 (APIV2 §5.1).** These were designed as `want_ack` **DMs** to get an ACK +
+> retransmit. Proven on air not to work: **Meshtastic 2.8 rejects PSK-encrypted DMs** ("legacy
+> DM") and we encrypt with the channel PSK, not PKI. The device transmitted the DM correctly
+> (flags `0x6B`, `to` = gateway) and mesh-gw's raw event stream saw **nothing**; `onair-ping`
+> scored 0/3, and 3/3 once reverted to broadcast. **Meshtastic-level `want_ack` therefore cannot
+> make gateway-facing traffic reliable** — that job falls entirely to the machine lane's
+> pull/re-PULL ARQ below, which is the real reliability win in v2.
 
 ### 2. Machine lane (everything else)
 `env`, `config`, `schema`, `debug`, `calc`, and images are **chunked, always** — even a 40-byte
@@ -64,12 +70,13 @@ responses published under a single generic `JSON` chunk `ptype`; `jsonBuild` siz
 - **Deployed `mylibs/mt-chunk`** on the un-reflashable field unit — v2 dev is bench-only.
 
 ## Frozen decisions (Phase 0 — 2026-07-22)
-The four contract questions are resolved; `APIV2.md` is stamped `v2.0` and carries no `TBD`.
+The four contract questions are resolved; `APIV2.md` is stamped `v2.1` and carries no `TBD`.
 
 1. **Port number → keep `261`** (`PAC_CHUNK_APP`); retire `260`. The chunk lane already lives
    on `261` with an unchanged wire format — no new portnum to register on either end.
 2. **Comfort set → `ping` + `status` only.** `env` moves to the machine lane (structured data,
-   not a one-glance human line).
+   not a one-glance human line). ⚠️ **Amended 2026-07-22:** the *set* stands, but they are
+   carried as **broadcast text, not want_ack DMs** — Meshtastic 2.8 rejects PSK DMs (APIV2 §5.1).
 3. **ptype granularity → one generic `JSON` ptype (`4`)** for every machine-lane JSON response;
    the JSON's own `t` field names the specific response. `SCHEMA` (1) is superseded; `IMAGE` (2)
    stays its own binary ptype.

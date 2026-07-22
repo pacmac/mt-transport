@@ -6,10 +6,10 @@
 > the contract here *first* and then the code). Consumers may read this directly for context,
 > but should depend on a `clients/<lang>/` library rather than hand-rolling the protocol.
 
-**Contract version: 2.0** — frozen 2026-07-22 (the four Phase-0 decisions are resolved below;
-no `TBD` remains). The machine-readable contract for v2. Byte offsets and constants below are
-**verified against the current code** (`src/mt_wire.h`, `clients/node/lib/chunk.js`,
-`src/main.cpp`). Big-endian throughout.
+**Contract version: 2.1** — frozen 2026-07-22, **amended the same day by an on-air finding**
+(§5.1: the comfort lane cannot use DMs). The machine-readable contract for v2. Byte offsets and
+constants below are **verified against the current code** (`src/mt_wire.h`,
+`clients/node/lib/chunk.js`, `src/main.cpp`). Big-endian throughout.
 
 ---
 
@@ -17,7 +17,7 @@ no `TBD` remains). The machine-readable contract for v2. Byte offsets and consta
 
 | port | role in v2 | notes |
 |---|---|---|
-| **1** (TEXT) | comfort lane | `ping`, `status` — text, sent as DMs |
+| **1** (TEXT) | comfort lane | `ping`, `status` — text, **broadcast** (NOT DMs — see §5.1) |
 | **261** (`PAC_CHUNK_APP`) | machine lane | all chunked responses + images (kept from v1; wire format unchanged) |
 | 260 (`PAC_ALARM_APP`) | **RETIRED** as a response port | no more raw JSON frames |
 | `TELEMETRY`/`NODEINFO`/`POSITION` | unchanged | native Meshtastic interop |
@@ -104,10 +104,36 @@ Two disjoint blocks share the port; the first byte decides.
 **This is the whole of "chunk everything":** a JSON response (`config`/`schema`/`debug`/`calc`/`env`)
 becomes a `JSON`-ptype payload, published exactly like an image. No frame-format change.
 
-## 5. Comfort lane (text DMs)
+## 5. Comfort lane (text, BROADCAST)
 
-Commands whose reply a human reads directly. Reply is a **text DM** back to `rx.from` with
-`want_ack` set.
+Commands whose reply a human reads directly. Reply is **plain text, BROADCAST** — not a DM.
+
+### 5.1 Why not DMs (on-air finding, 2026-07-22 — supersedes the v2.0 design)
+
+v2.0 specified the comfort lane as a **text DM to `rx.from` with `want_ack`**, to get an ACK and
+retransmit. **That does not work through the gateway and has been reverted.**
+
+**Meshtastic 2.8 rejects PSK-encrypted DMs** ("legacy DM"); it only accepts DMs encrypted with
+PKI (per-node public keys), which this transport does not implement — it uses channel-PSK
+AES-CTR. `specs/device-comms.md:76` already documented this for the command direction; it applies
+identically to replies.
+
+**Evidence (not inference):** the bench unit built and transmitted the reply correctly — device
+serial showed `to=0x2687afb1` (the gateway), flags `0x6B` (want_ack bit 3 set), `REPLY dm … OK` —
+while mesh-gw's **raw `/events` stream saw nothing at all** from that node across a 30 s window,
+and `onair-ping` scored **0/3**. Reverting the same build to a broadcast reply scored **3/3**.
+
+**Consequences for v2:**
+- The comfort lane is **broadcast text**. It gets no ACK, and mesh flooding remains its only
+  delivery aid — the v1 situation.
+- **Meshtastic-level `want_ack` cannot make gateway-facing traffic reliable.** Reliability for
+  anything crossing the gateway must be **application-level ARQ**, i.e. the machine lane's
+  pull + re-PULL repair (§4). This *strengthens* the "chunk everything" decision: the chunk lane
+  is now the ONLY mechanism that actually recovers loss, not merely the uniform one.
+- The transport's `want_ack` + retransmit (Phase 1) remains correct and stays in the library, but
+  is only usable **device↔device where both ends run this firmware**, or later over PKI DMs.
+- An ACK is `Routing.error_reason == NONE` **only**. A NAK carries the same `request_id`; treating
+  it as an ACK marks an undelivered reply as delivered.
 
 | command | reply | comfort? |
 |---|---|---|
@@ -120,11 +146,12 @@ reading is structured data a consumer parses, not a one-glance human line.
 
 ## 6. Request / response flows
 
-**Comfort (e.g. `status`):**
+**Comfort (e.g. `status`)** — broadcast both ways (see §5.1; 2.8 rejects PSK DMs):
 ```
-node-dash --(text DM "status", to=device, want_ack)--> device
-device    --(text DM reply, to=node-dash, want_ack)--> node-dash
-                (no ACK within timeout -> device resend())
+node-dash --(broadcast text "@<target> status", channel 2)--> device
+device    --(broadcast text reply, reply_id = command id)---> node-dash
+                (no ACK exists; correlation is by reply_id, recovery is
+                 a client-side re-send of the command)
 ```
 
 **Machine, pull (e.g. `config`):**
