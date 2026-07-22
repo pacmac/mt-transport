@@ -104,14 +104,16 @@ Two disjoint blocks share the port; the first byte decides.
 **This is the whole of "chunk everything":** a JSON response (`config`/`schema`/`debug`/`calc`/`env`)
 becomes a `JSON`-ptype payload, published exactly like an image. No frame-format change.
 
-## 5. Comfort lane (text, BROADCAST)
+## 5. Comfort lane (text; broadcast **until PKI**, then DM)
 
-Commands whose reply a human reads directly. Reply is **plain text, BROADCAST** — not a DM.
+Commands whose reply a human reads directly. **The intended transport is an acked DM.** It is
+plain text BROADCAST right now only because PSK DMs do not survive the gateway — see §5.1.
 
-### 5.1 Why not DMs (on-air finding, 2026-07-22 — supersedes the v2.0 design)
+### 5.1 DMs require PKI (on-air finding, 2026-07-22)
 
 v2.0 specified the comfort lane as a **text DM to `rx.from` with `want_ack`**, to get an ACK and
-retransmit. **That does not work through the gateway and has been reverted.**
+retransmit. **That design stands** — but it cannot be built on channel-PSK encryption. The PSK
+version was reverted to broadcast so the unit keeps answering while PKI is implemented.
 
 **Meshtastic 2.8 rejects PSK-encrypted DMs** ("legacy DM"); it only accepts DMs encrypted with
 PKI (per-node public keys), which this transport does not implement — it uses channel-PSK
@@ -123,9 +125,14 @@ serial showed `to=0x2687afb1` (the gateway), flags `0x6B` (want_ack bit 3 set), 
 while mesh-gw's **raw `/events` stream saw nothing at all** from that node across a 30 s window,
 and `onair-ping` scored **0/3**. Reverting the same build to a broadcast reply scored **3/3**.
 
+**Resolution (Peter, 2026-07-22): implement PKI.** PKC is the supported DM path, so the acked-DM
+comfort lane is deferred, not abandoned — see [`../../specs/v2-phase1b-pki.md`](../../specs/v2-phase1b-pki.md)
+for the verified algorithm (X25519 → SHA256 → AES-256-CCM, `channel=0` marker, +12 B overhead).
+**Until PKI lands, the comfort lane is broadcast text.**
+
 **Consequences for v2:**
-- The comfort lane is **broadcast text**. It gets no ACK, and mesh flooding remains its only
-  delivery aid — the v1 situation.
+- The comfort lane is **broadcast text** *for now*. It gets no ACK, and mesh flooding remains its
+  only delivery aid — the v1 situation — until Phase 1b.
 - **Meshtastic-level `want_ack` cannot make gateway-facing traffic reliable.** Reliability for
   anything crossing the gateway must be **application-level ARQ**, i.e. the machine lane's
   pull + re-PULL repair (§4). This *strengthens* the "chunk everything" decision: the chunk lane
@@ -154,20 +161,30 @@ device    --(broadcast text reply, reply_id = command id)---> node-dash
                  a client-side re-send of the command)
 ```
 
-**Machine, pull (e.g. `config`):**
+**Machine, pull (e.g. `config`)** — frames are **BROADCAST on port 261 *today*, pending PKI.**
+This is the current transport, not the end state: once PKI DMs work (Phase 1b) the machine lane
+should move to DMs too, like everything else. It is listed as broadcast here only because that is
+what actually works against a 2.8 gateway right now (§5.1), and because the lane is *already*
+targeted at the application layer (pid + target token) and recovers loss by **re-PULL** — which
+is why image transfer keeps working in the meantime.
 ```
-node-dash --(GETMANIFEST pid, DM)-------------------> device
-device    --(MANIFEST: ptype, bytes, count, crc)----> node-dash
-node-dash --(PULL first,count)----------------------> device
-device    --(CHUNK × n, each DM+want_ack)-----------> node-dash
+node-dash --(GETMANIFEST pid, broadcast)-----------> device
+device    --(MANIFEST: ptype, bytes, count, crc)---> node-dash
+node-dash --(PULL first,count)---------------------> device
+device    --(CHUNK × n, broadcast)-----------------> node-dash
 node-dash  (reassemble; verify whole-payload crc; re-PULL any missing idx)
 ```
 
 **Machine, push (small/self-initiated):**
 ```
-device    --(MANIFEST, then CHUNK × n, DM+want_ack)-> node-dash
+device    --(MANIFEST, then CHUNK × n, broadcast)--> node-dash
 node-dash  (reassemble; request repair of any gap at the end)
 ```
+
+**Loss recovery in the machine lane is re-PULL.** The client knows which indices are missing after
+a CRC check and asks again. That is application-level ARQ, it works over broadcast, and it is the
+ONLY delivery guarantee that survives the gateway *until PKI lands*. It stays useful afterwards
+too — re-PULL and want_ack are complementary, not alternatives.
 
 **Default is pull:** the client asks (`GETMANIFEST`), the device manifests, the client pulls and
 reassembles (§6 "Machine, pull"). Push (device streams unsolicited) stays for images and
@@ -180,7 +197,10 @@ event-driven payloads (motion / alarm), **not** for command responses.
 - `jsonBuild` size-shedding (`JReq` MUST/OPTIONAL, fit-loop, reserved-brace) — the cap it
   guarded against no longer exists. Builder collapses to always-emit. **Every `jsonBuild` /
   `JReq` caller must be checked before deletion** (partly unwinds fw 260721-11).
-- `@xxxx` short-name addressing — replaced by DM to nodeNum.
+- `@xxxx` short-name addressing — replaced by DM to nodeNum. ⚠️ **Blocked on Phase 1b (PKI).**
+  Meshtastic-level DM addressing is unavailable with PSK encryption (§5.1), so the app-level
+  `@<target>` token must REMAIN until PKI DMs work. Retiring it before then would leave no way to
+  address a specific unit.
 
 ## 8. Not part of v2 (do not conflate)
 - Channel-0 private-vs-primary config (channel/hash layer; independent).

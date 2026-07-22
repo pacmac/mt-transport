@@ -1,6 +1,6 @@
 # mt-transport v2 — scope & rationale
 
-**Status:** contract **frozen at v2.0** (2026-07-22, Phase 0 done). **No firmware changed yet.** These docs are the
+**Status:** contract at **v2.1** (2026-07-22). Phase 0 frozen; Phase 1 landed both ends. **Direction: PKI DMs (Phase 1b)** — the broadcast comfort lane is an interim state, not the design. These docs are the
 source of truth; the wire contract lives in [`APIV2.md`](./APIV2.md). node-dash symlinks this
 directory. xsession is now for **ambiguities/clarifications only** — not for carrying the
 contract.
@@ -58,7 +58,7 @@ frame. Accepted — uniformity and reliability over per-message efficiency.
 See the change list in [`../../specs/v2-transport.md`](../../specs/v2-transport.md). In brief:
 `want_ack` + retransmit; one private port (`261` kept, `260` retired as a response port); JSON
 responses published under a single generic `JSON` chunk `ptype`; `jsonBuild` size-shedding and
-`sch` pagination removed; `@xxxx` name addressing replaced by DM-to-nodeNum.
+`sch` pagination removed; `@xxxx` name addressing replaced by DM-to-nodeNum **once PKI lands (Phase 1b)** — it must stay until then, as PSK DMs are rejected by the gateway.
 
 ## What v2 does NOT touch
 - **Channel-0 private-vs-primary config.** Independent decision at the channel/hash layer.
@@ -125,9 +125,10 @@ point behind everything.
 | phase | delivers | breaking? |
 |---|---|:--:|
 | **0** ✅ | **Freeze the contract** — resolved the 4 TBDs (port, comfort set, ptype granularity, pull-vs-push) and stamped APIV2 `v2.0`. **Done 2026-07-22** (see "Frozen decisions" above). Gated everything. | — |
-| **1** | **Reliability layer** — `want_ack` + retransmit + DM addressing (`to=rx.from`). Transport-only, independently testable (force a drop, prove the retransmit). | no |
+| **1** ✅ | **Reliability layer** — `want_ack` + retransmit, transport-owned. Landed both ends. ⚠️ DM addressing proved unusable (2.8 rejects PSK DMs, APIV2 §5.1); comfort stays broadcast until **1b**. | no |
 | **2** | **Chunk-everything** — `config`/`debug`/`calc`/`schema` as chunk ptypes; lib verbs pull+reassemble. **Old 260 path stays live in parallel** — A/B-able. | no |
-| **3** | **Collapse to one port + retire `@xxxx`** (DM by nodeNum). First deliberately-breaking step. | **yes** |
+| **1b** | **PKI (PKC) DMs** — X25519+SHA256+AES-CCM, `channel=0` marker. Unblocks acked DMs. Gates the comfort lane and `@xxxx` retirement. `specs/v2-phase1b-pki.md`. | no |
+| **3** | **Collapse to one port**; retire `@xxxx` **only after 1b** (DM by nodeNum needs PKI). First deliberately-breaking step. | **yes** |
 | **4** | **Remove dead code** — `jsonBuild` shedding, `sch` pagination, old 260 sends — only after 2/3 proven, only after grepping every caller. | **yes** |
 | **5** | **Conformance + coordinated cutover** — full fixture conformance, bench e2e, one-shot device+node-dash field cutover. | **yes** |
 

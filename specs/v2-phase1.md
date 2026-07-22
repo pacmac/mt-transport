@@ -90,13 +90,14 @@ want_ack is never set — and every reply is a broadcast, so loss is silent and 
   minimum gate before any on-air claim — **done: clean, RAM 22.3%, Flash 25.5% (+928 B).**
   Offline host-check **done: PASS** (output above).
 
-## ON-AIR RESULT 2026-07-22 — the DM design is dead; two real defects found
+## ON-AIR RESULT 2026-07-22 — DMs need PKI (design stands); two real defects found
 
-Ran on the bench (`!8cee336b`, fw `2-260722-1`) with the live rig. **The comfort-DM half of this
-phase does not work and has been reverted.** Both findings below were caught by *observing the
+Ran on the bench (`!8cee336b`, fw `2-260722-1`) with the live rig. **The comfort-DM half of this phase cannot run on
+channel-PSK encryption and was reverted to broadcast as an INTERIM measure — the DM design
+itself stands and is unblocked by PKI (Phase 1b, `specs/v2-phase1b-pki.md`).** Both findings below were caught by *observing the
 device*, not by reasoning.
 
-**1. Meshtastic 2.8 rejects PSK-encrypted DMs — the comfort lane cannot be a DM.**
+**1. Meshtastic 2.8 rejects PSK-encrypted DMs — the comfort lane cannot be a *PSK* DM.**
 `onair-ping` scored **0/3**. Device serial proved the reply was built and sent correctly:
 `to=0x2687afb1` (gateway), flags **`0x6B`** — the exact reliable value `offline_wire_flags.cpp`
 predicts — and `REPLY dm … OK`. But mesh-gw's **raw `/events` stream saw nothing whatsoever**
