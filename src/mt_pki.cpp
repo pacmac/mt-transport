@@ -56,7 +56,25 @@ void pkiGenerateKeyPair(uint8_t publicOut[32], uint8_t privateOut[32])
 {
     Curve25519::dh1(publicOut, privateOut);
 }
+
+bool pkiPublicFromPrivate(uint8_t publicOut[32], const uint8_t privateKey[32])
+{
+    uint8_t f[32];
+    memcpy(f, privateKey, 32);
+    pkiClampPrivate(f);
+    // eval(k, f, 0): NULL x means the base point 9 — the same call dh1() makes.
+    return Curve25519::eval(publicOut, f, nullptr);
+}
 #endif // !MT_PKI_HOST_TEST
+
+// Clamping is spec (RFC 7748) and idempotent. Kept outside the host-test guard so the
+// KATs can exercise it without the Arduino Crypto library.
+void pkiClampPrivate(uint8_t priv[32])
+{
+    priv[0] &= 0xF8;
+    priv[31] = (priv[31] & 0x7F) | 0x40;
+}
+
 
 // Reference: CryptoEngine::initNonce. The extraNonce write lands at offset 4 and
 // OVERLAYS the upper half of packetId. That looks like a bug and is not ours to fix:

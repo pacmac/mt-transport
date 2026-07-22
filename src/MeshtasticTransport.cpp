@@ -85,6 +85,9 @@ bool MeshtasticTransport::setPkiIdentity(const uint8_t privateKey[32])
     if (!privateKey)
         return false;
     memcpy(_pkiPriv, privateKey, 32);
+    // Clamp ONCE here (RFC 7748, idempotent). Public-key derivation and ECDH then
+    // provably use the same scalar, whatever tool produced the key.
+    pkiClampPrivate(_pkiPriv);
     _pkiHavePriv = true;
     pkiBegin(); // install the AES backend the vendored CCM code calls
     return true;
