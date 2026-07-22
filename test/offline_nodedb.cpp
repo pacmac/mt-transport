@@ -121,6 +121,17 @@ int main() {
     assert(strcmp(at(0)->shortName, "U33B") == 0);
     assert(!dirty() && "a freshly loaded table is not dirty (no pointless flash write)");
 
+    // lastHeard must be ZEROED on load: it is millis()/1000, which restarts at 0 on
+    // reboot, so a persisted value is a timestamp from a dead clock. Observed on the
+    // bench as an age of 4294966734 (uint32 underflow of now - lastHeard), and it
+    // would also make a stale entry look eternally NEWEST so LRU never evicts it.
+    for (uint8_t i = 0; i < NODEDB_MAX; i++)
+        assert(at(i)->lastHeard == 0 && "loaded lastHeard must be reset, not restored");
+    // ...and a real bump after load must still order correctly.
+    heard(1002, 500);
+    assert(at(0)->lastHeard == 0 && "untouched entry stays oldest");
+    printf("PASS  lastHeard zeroed on load (no post-reboot underflow / LRU inversion)\n");
+
     buf[10] ^= 0xFF;                        // corrupt a byte inside the payload
     assert(!deserialize(buf, n) && "CRC mismatch must be REJECTED wholesale");
     buf[10] ^= 0xFF;
