@@ -119,6 +119,30 @@ public:
     // Use to shore up one-shot replies on lossy links.
     bool resend();
 
+    // ---- v2 Phase 1b: PKI (PKC) direct messages ------------------------------
+    // Meshtastic 2.8 discards PSK-encrypted DMs ("legacy DM"), so PKC is the only
+    // carrier a stock gateway will accept — see docs/v2/APIV2.md §5.1.
+    //
+    // Identity is INJECTED, never baked in or generated behind the app's back: the
+    // application owns and PERSISTS the 32-byte private key, exactly as it owns the
+    // channel PSK. Regenerating it silently breaks every inbound DM, and the device
+    // cannot tell you that happened — so the lib refuses to own that decision.
+    bool setPkiIdentity(const uint8_t privateKey[32]);
+    bool pkiReady() const { return _pkiHavePriv; }
+
+    // Register a peer's public key so we can encrypt to it. Small table by design:
+    // we talk to a gateway, not a whole mesh. Replaces the key if the node is known.
+    bool addPkiPeer(uint32_t nodeNum, const uint8_t publicKey[32]);
+
+    // Send a PKC direct message. Always directed — a PKC broadcast has no recipient
+    // key AND would be a broadcast on channel 0, which stays banned. Sets the header
+    // channel byte to 0 (the PKC marker, not the primary channel) and costs 12 bytes
+    // of payload budget. wantAck works here, which is the entire point: this is the
+    // path on which the acked comfort reply becomes possible.
+    bool sendPki(uint32_t portnum, const uint8_t *payload, size_t len, uint32_t to,
+                 uint8_t hopLimit = 3, uint32_t requestId = 0, uint32_t replyId = 0,
+                 bool wantAck = false);
+
     // v2 reliability config (RAM-only, not persisted — a reboot restores defaults,
     // so a test value can never silently outlive a test). A directed want_ack send
     // is retransmitted every timeoutMs until ACKed, for at most maxAttempts total
@@ -326,6 +350,21 @@ private:
     bool pushRx(const RxPacket &p);
     bool enqueueFrame(const uint8_t *frame, size_t len); // copy into the TX ring
     void serviceAck();            // v2: retransmit the pending want_ack frame on timeout
+
+    // Shared build+encrypt+queue path for send() and sendPki(); `usePki` selects the
+    // PKC route (channel 0, X25519/CCM) over the channel-PSK route (channel hash, CTR).
+    bool buildAndQueue(uint32_t portnum, const uint8_t *payload, size_t len, uint32_t to,
+                       uint8_t hopLimit, uint32_t requestId, uint32_t replyId,
+                       bool wantAck, bool usePki);
+    const uint8_t *pkiPeerKey(uint32_t nodeNum) const;
+
+    // PKI identity + peer table (see setPkiIdentity/addPkiPeer).
+    static const uint8_t PKI_PEERS_N = 4;
+    struct PkiPeer { uint32_t node; uint8_t pub[32]; };
+    PkiPeer  _pkiPeers[PKI_PEERS_N]{};
+    uint8_t  _pkiPeerCount = 0;
+    uint8_t  _pkiPriv[32]{};
+    bool     _pkiHavePriv = false;
     void driveTx();               // advance the TX state machine (timing)
     void startSending();          // startTransmit() the head item (+ airtime accounting)
 };

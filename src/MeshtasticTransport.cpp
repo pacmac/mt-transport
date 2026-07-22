@@ -8,6 +8,7 @@
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic/portnums.pb.h"
 #include "mt_crypto.h"
+#include "mt_pki.h"
 
 namespace mt {
 
@@ -79,9 +80,65 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
     return true;
 }
 
+bool MeshtasticTransport::setPkiIdentity(const uint8_t privateKey[32])
+{
+    if (!privateKey)
+        return false;
+    memcpy(_pkiPriv, privateKey, 32);
+    _pkiHavePriv = true;
+    pkiBegin(); // install the AES backend the vendored CCM code calls
+    return true;
+}
+
+bool MeshtasticTransport::addPkiPeer(uint32_t nodeNum, const uint8_t publicKey[32])
+{
+    if (!publicKey || nodeNum == 0 || nodeNum == BROADCAST_ADDR)
+        return false;
+    for (uint8_t i = 0; i < _pkiPeerCount; i++) { // known peer: refresh the key
+        if (_pkiPeers[i].node == nodeNum) {
+            memcpy(_pkiPeers[i].pub, publicKey, 32);
+            return true;
+        }
+    }
+    if (_pkiPeerCount >= PKI_PEERS_N)
+        return false;
+    _pkiPeers[_pkiPeerCount].node = nodeNum;
+    memcpy(_pkiPeers[_pkiPeerCount].pub, publicKey, 32);
+    _pkiPeerCount++;
+    return true;
+}
+
+const uint8_t *MeshtasticTransport::pkiPeerKey(uint32_t nodeNum) const
+{
+    for (uint8_t i = 0; i < _pkiPeerCount; i++)
+        if (_pkiPeers[i].node == nodeNum)
+            return _pkiPeers[i].pub;
+    return nullptr;
+}
+
+bool MeshtasticTransport::sendPki(uint32_t portnum, const uint8_t *payload, size_t len,
+                                  uint32_t to, uint8_t hopLimit, uint32_t requestId,
+                                  uint32_t replyId, bool wantAck)
+{
+    // Directed only: PKC has no key for a broadcast, and a broadcast on channel 0 is
+    // exactly what the flooding ban forbids. Refuse rather than fall back to PSK —
+    // a silent downgrade would look like success while being undeliverable.
+    if (to == BROADCAST_ADDR || !_pkiHavePriv || !pkiPeerKey(to))
+        return false;
+    return buildAndQueue(portnum, payload, len, to, hopLimit, requestId, replyId, wantAck, true);
+}
+
 bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
                                size_t len, uint32_t to, uint8_t hopLimit,
                                uint32_t requestId, uint32_t replyId, bool wantAck)
+{
+    return buildAndQueue(portnum, payload, len, to, hopLimit, requestId, replyId, wantAck, false);
+}
+
+bool MeshtasticTransport::buildAndQueue(uint32_t portnum, const uint8_t *payload,
+                                        size_t len, uint32_t to, uint8_t hopLimit,
+                                        uint32_t requestId, uint32_t replyId,
+                                        bool wantAck, bool usePki)
 {
     if (!_radio || len > sizeof(meshtastic_Data_payload_t::bytes))
         return false;
@@ -109,8 +166,22 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     // never blocks; service() transmits it later. Crypto/size are rejected here,
     // before the queue, so only sendable frames are ever queued.
     uint8_t f[FRAME_CAP];
-    if (!ctrCrypt(_ch.psk, _ch.pskLen, id, _nodeNum, plain, f + sizeof(PacketHeader), plainLen))
+    size_t  cipherLen = plainLen;
+    if (usePki) {
+        // PKC costs PKI_OVERHEAD on the wire, and the CCM primitive additionally
+        // scribbles up to PKI_SCRATCH-1 bytes past the plaintext while working. Both
+        // must fit in the payload area or pkiEncrypt refuses — never overruns.
+        const uint8_t *peer = pkiPeerKey(to);
+        if (!peer || plainLen + PKI_SCRATCH > MAX_PAYLOAD)
+            return false;
+        // extraNonce must be unpredictable: it is the varying half of the CCM nonce.
+        const uint32_t extraNonce = _rng ? _rng() : 0;
+        if (!pkiEncrypt(to, _nodeNum, peer, _pkiPriv, id, extraNonce, plain, plainLen,
+                        f + sizeof(PacketHeader), MAX_PAYLOAD, &cipherLen))
+            return false;
+    } else if (!ctrCrypt(_ch.psk, _ch.pskLen, id, _nodeNum, plain, f + sizeof(PacketHeader), plainLen)) {
         return false;
+    }
 
     if (_hopOverride) hopLimit = _hopOverride;   // test override (setHopOverride) — forces every frame
 
@@ -124,11 +195,14 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     h.from = _nodeNum;
     h.id = id;
     h.flags = packFlags(hopLimit, hopLimit, reliable); // hop_start = hop_limit at origin
-    h.channel = _hash;
+    // PKC is identified on the wire by channel == 0 (Meshtastic Router.cpp). That is a
+    // crypto marker on a DIRECTED packet, not the primary broadcast channel — the
+    // flooding ban is about broadcasts, and sendPki() refuses those outright.
+    h.channel = usePki ? PKI_CHANNEL : _hash;
     h.next_hop = 0;
     h.relay_node = 0;
     memcpy(f, &h, sizeof(h));
-    size_t frameLen = sizeof(h) + plainLen;
+    size_t frameLen = sizeof(h) + cipherLen;
 
     if (!enqueueFrame(f, frameLen))
         return false; // queue full — caller may retry
@@ -390,17 +464,34 @@ void MeshtasticTransport::handleRxDone()
 
     PacketHeader h;
     memcpy(&h, raw, sizeof(h));
-    if (h.channel != _hash)
-        return; // not our channel
     if (h.from == _nodeNum)
         return; // our own packet relayed back to us (rebroadcast peers)
-    if (h.to != _nodeNum && h.to != BROADCAST_ADDR)
-        return; // not for us
+
+    // A PKC packet is addressed to US and carries channel == 0, so it can never match
+    // our channel hash. This branch MUST come before the hash filter below or every
+    // inbound PKI DM is silently discarded — the mirror of the failure that killed the
+    // PSK DM design (docs/v2/APIV2.md §5.1).
+    const bool isPki = (h.to == _nodeNum && h.channel == PKI_CHANNEL);
+    if (!isPki) {
+        if (h.channel != _hash)
+            return; // not our channel
+        if (h.to != _nodeNum && h.to != BROADCAST_ADDR)
+            return; // not for us
+    }
 
     uint8_t plain[MAX_PAYLOAD];
     size_t plainLen = rawLen - sizeof(PacketHeader);
-    if (!ctrCrypt(_ch.psk, _ch.pskLen, h.id, h.from, raw + sizeof(h), plain, plainLen))
+    if (isPki) {
+        // Needs the sender's public key; an unknown peer is not decryptable, and a
+        // failed auth tag must yield NOTHING (pkiDecrypt enforces both).
+        const uint8_t *peer = pkiPeerKey(h.from);
+        if (!_pkiHavePriv || !peer)
+            return;
+        if (!pkiDecrypt(h.from, peer, _pkiPriv, h.id, raw + sizeof(h), plainLen, plain, &plainLen))
+            return;
+    } else if (!ctrCrypt(_ch.psk, _ch.pskLen, h.id, h.from, raw + sizeof(h), plain, plainLen)) {
         return;
+    }
 
     meshtastic_Data data = meshtastic_Data_init_zero;
     pb_istream_t is = pb_istream_from_buffer(plain, plainLen);
