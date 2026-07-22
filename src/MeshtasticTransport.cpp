@@ -147,14 +147,18 @@ bool MeshtasticTransport::buildAndQueue(uint32_t portnum, const uint8_t *payload
         return false;
 
     // Envelope: Data{portnum, payload}
-    meshtastic_Data data = meshtastic_Data_init_zero;
+    // Static: this + plain/f below would put ~760 B on the 4 KB loop-task stack,
+    // which the X25519 chain underneath then overflows (spec wdt-pki-reply.md rev 2).
+    // Loop-task-only by design (single instance, see _isrTarget), re-zeroed per call.
+    static meshtastic_Data data;
+    data = meshtastic_Data_init_zero;
     data.portnum = (meshtastic_PortNum)portnum;
     data.payload.size = len;
     memcpy(data.payload.bytes, payload, len);
     data.request_id = requestId;
     data.reply_id = replyId;
 
-    uint8_t plain[MAX_PAYLOAD];
+    static uint8_t plain[MAX_PAYLOAD];
     pb_ostream_t os = pb_ostream_from_buffer(plain, sizeof(plain));
     if (!pb_encode(&os, meshtastic_Data_fields, &data))
         return false;
@@ -168,7 +172,7 @@ bool MeshtasticTransport::buildAndQueue(uint32_t portnum, const uint8_t *payload
     // Build into a LOCAL frame, then enqueue. send() never touches the radio and
     // never blocks; service() transmits it later. Crypto/size are rejected here,
     // before the queue, so only sendable frames are ever queued.
-    uint8_t f[FRAME_CAP];
+    static uint8_t f[FRAME_CAP];
     size_t  cipherLen = plainLen;
     if (usePki) {
         // PKC costs PKI_OVERHEAD on the wire, and the CCM primitive additionally
@@ -450,7 +454,10 @@ bool MeshtasticTransport::pushRx(const RxPacket &p)
 // poll(). Re-arms RX immediately so a reject does not blind us.
 void MeshtasticTransport::handleRxDone()
 {
-    uint8_t raw[FRAME_CAP];
+    // Static buffers: the PKC decrypt below runs the same ~2 KB X25519 chain as the
+    // TX path; with these on the stack this frame was 1208 B and the total ~3.8 KB
+    // of the 4 KB loop-task stack (spec wdt-pki-reply.md rev 2). Loop-task-only.
+    static uint8_t raw[FRAME_CAP];
     size_t rawLen = _radio->getPacketLength();
     // Clamp BEFORE anything uses the length. getPacketLength() is attacker/noise
     // controlled: a corrupt frame reporting 255 against a 253-byte buffer would
@@ -490,7 +497,7 @@ void MeshtasticTransport::handleRxDone()
             return; // not for us
     }
 
-    uint8_t plain[MAX_PAYLOAD];
+    static uint8_t plain[MAX_PAYLOAD];
     size_t plainLen = rawLen - sizeof(PacketHeader);
     if (isPki) {
         // Needs the sender's public key; an unknown peer is not decryptable, and a
@@ -514,7 +521,8 @@ void MeshtasticTransport::handleRxDone()
         return;
     }
 
-    meshtastic_Data data = meshtastic_Data_init_zero;
+    static meshtastic_Data data;
+    data = meshtastic_Data_init_zero;
     pb_istream_t is = pb_istream_from_buffer(plain, plainLen);
     if (!pb_decode(&is, meshtastic_Data_fields, &data))
         return; // wrong PSK garbage decodes to noise; protobuf catches it
@@ -546,7 +554,9 @@ void MeshtasticTransport::handleRxDone()
     if (isDuplicate(h.from, h.id))
         return; // ReliableRouter retries land here
 
-    RxPacket p;
+    // Static like the buffers above; every field is assigned below before pushRx,
+    // and stale payload-tail bytes are dead data guarded by payloadLen.
+    static RxPacket p;
     p.from = h.from;
     p.to = h.to;
     p.id = h.id;
