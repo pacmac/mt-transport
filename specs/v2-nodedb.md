@@ -49,6 +49,38 @@ nothing acting on NodeInfo. Implement the learning path; confirm empirically via
 command once it exists (that is cheaper and more definitive than a blind serial vigil, since the
 periodic interval is hours).
 
+## MEASURED GAP — key re-learning has NO trigger (2026-07-22, proven on the bench)
+Ran `nodes clear` on the bench, then re-queried:
+
+```
+14:18:45Z {"type":"nodes","n":2,"nd":[[646426545,"4363",0],[2558179343,"0000",4]]}
+14:20:44Z {"type":"nodes","n":2,"nd":[[2558179343,"0000",54],[646426545,"0000",0]]}
+```
+
+Both nodes were re-ADMITTED (admission works) but the gateway key went `4363` -> `0000`
+and **never came back**. The device could not DM again until a reboot re-seeded from
+`secrets.h`.
+
+**Why:** the only two paths that put NodeInfo on our channel are "gateway heard a NEW
+node" (we are not new to it) and "PKI decrypt failure" (needs us to SEND PKC, which we
+cannot without a key). Neither can fire, so a lost key is permanent. Eviction is
+therefore NOT the graceful degradation this spec assumed — it is a dead end.
+
+**Fix (not yet implemented):** when we need to DM a node and hold no key, send OUR
+NodeInfo to it with `want_response = true`. `NodeInfoModule::handleReceivedProtobuf`
+(line 22-40) replies to that with its own NodeInfo, on the channel the request arrived
+on — i.e. ours.
+
+**HARD CONSTRAINT on that fix:** replies to `want_response` are **suppressed per sender
+for 12 HOURS** (`NodeInfoReplySuppressSeconds = USERPREFS_NODEINFO_REPLY_SUPPRESS_SECS`,
+NodeInfoModule.cpp:20,34-40). So we get at most ONE NodeInfo per peer per 12 h. That
+means:
+- We must rate-limit our own requests (one attempt, then back off — spamming is useless
+  and only costs airtime).
+- Recovery from a lost key can take up to 12 h, so **losing a key is expensive**.
+- The `secrets.h` SEED therefore stays important as the cold-start path, and eviction of
+  a keyed node should be avoided rather than merely tolerated.
+
 ## Design (agreed)
 - **16-entry ring**, LRU by `last_heard`. A new node evicts the oldest.
   Record ≈45 B: `nodeNum(4) + public_key(32) + last_heard(4) + short_name(5)`. ~720 B RAM total.
