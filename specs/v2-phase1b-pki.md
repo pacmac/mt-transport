@@ -7,12 +7,26 @@ priority: v2 Phase 1b — PKI (PKC) direct messages. Prerequisite for ANY reliab
 source_hash: ~
 project: mt-transport (crypto + transport). Firmware follows once the lib supports it.
 scope:
-  - src/mt_pki.h / src/mt_pki.cpp     # NEW — X25519 + SHA256 + AES-CCM PKC encrypt/decrypt
-  - src/aes-ccm.h / src/aes-ccm.cpp   # NEW — vendored AES-CCM (Crypto lib has NO CCM)
+  - src/mt_pki.h / src/mt_pki.cpp     # PKC encrypt/decrypt — to be REPLACED by vendored CryptoEngine
+  - src/mt_crypto_engine.h / .cpp     # NEW — VENDORED Meshtastic CryptoEngine PKC (official impl)
+  - src/aes-ccm.h / src/aes-ccm.cpp   # vendored AES-CCM (Crypto lib has NO CCM)
   - src/MeshtasticTransport.h/.cpp    # PKI send path + RX branch for channel==0 directed
   - src/mt_wire.h                     # PKC constants
-  - test/offline_pki_vectors.cpp      # NEW — host test vs known-answer vectors
+  - test/offline_pki_vectors.cpp      # host known-answer vectors
+  # firmware end — "lands both ends" (sibling repo):
+  - ../pac-garage-alarm/src/main.cpp        # publish User.public_key; comfort reply via sendPki;
+                                            # revisit is_unmessagable; FW_VERSION bump
+  - ../pac-garage-alarm/include/secrets.h   # injected PKI private key + peer public key (gitignored)
+  - ../pac-garage-alarm/platformio.ini      # declare mt-transport version requirement
+  - ../pac-garage-alarm/docs/spec-nodeinfo-unmessagable.md  # its "we do not implement PKI" premise is void
 ---
+
+## ACCEPTANCE TEST (the gate — must flip FAIL -> PASS)
+    node clients/node/test/onair-ping.js --target 336b --count 1 --dm --expect-ack acked
+Today it FAILS: gateway holds `public_key: NONE` for the bench, so Meshtastic refuses to send the
+DM (`Router.cpp:750`, "refusing to send legacy DM") — status stays `queued`, no ack, no reply.
+Publishing a public key makes the chain `queued -> sent -> acked` with a reply. That flip is the
+proof PKI works; nothing else counts as done.
 
 # v2 Phase 1b — PKI (PKC) direct messages
 

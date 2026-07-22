@@ -31,6 +31,7 @@ static const size_t PKI_AUTH_LEN    = 8;  // CCM auth tag (M=8)
 static const size_t PKI_XNONCE_LEN  = 4;  // extraNonce appended after the tag
 static const size_t PKI_OVERHEAD    = PKI_AUTH_LEN + PKI_XNONCE_LEN; // 12
 static const uint8_t PKI_CHANNEL    = 0;  // PKC marker in PacketHeader.channel
+static const uint32_t BROADCAST_NODE = 0xFFFFFFFFu; // PKC to broadcast is refused
 
 // CCM encrypts in whole 16-byte blocks, so aes_ccm_ae can write up to 15 bytes PAST
 // the plaintext length (upstream Meshtastic warns of exactly this). The output buffer
