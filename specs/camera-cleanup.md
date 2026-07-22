@@ -8,6 +8,15 @@ scope:
   - mylibs/mt-chunk/src/M5CameraSource.h
 ---
 
+> ### ⚠ SUPERSEDED 2026-07-22 — the I2C camera transport NO LONGER EXISTS
+> The camera link is **UART only**. All I2C code (`buildInfo`/`onReceive`/`onRequest`,
+> `Wire`, `I2C_ADDR`, `g_out`), every `CAM_UART` `#ifdef`, and the second build env were
+> **deleted** — see `specs/strip-cam-i2c.md`. It was already failing to compile.
+>
+> Anything below describing an I2C path as *retained*, a *fallback*, *untouched*, or a
+> live `#else` branch is **HISTORICAL AND FALSE**. Do not act on it. Do not reintroduce
+> I2C: one transport, one build env, deliberately.
+
 # Spec: camera-cleanup — retire the diagnostic scaffolding now the fix is proven
 
 Three loose ends left by the I2C fix, all recorded in

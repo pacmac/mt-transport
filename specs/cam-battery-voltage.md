@@ -16,6 +16,15 @@ source_hash:
   pac-garage-alarm/src/main.cpp: 8d5a8b713f429abcc216131f5d823de928b5cad0a21d7df13059769d3158d4cf
 ---
 
+> ### ⚠ SUPERSEDED 2026-07-22 — the I2C camera transport NO LONGER EXISTS
+> The camera link is **UART only**. All I2C code (`buildInfo`/`onReceive`/`onRequest`,
+> `Wire`, `I2C_ADDR`, `g_out`), every `CAM_UART` `#ifdef`, and the second build env were
+> **deleted** — see `specs/strip-cam-i2c.md`. It was already failing to compile.
+>
+> Anything below describing an I2C path as *retained*, a *fallback*, *untouched*, or a
+> live `#else` branch is **HISTORICAL AND FALSE**. Do not act on it. Do not reintroduce
+> I2C: one transport, one build env, deliberately.
+
 # Expose the camera battery voltage in the cam grab reply
 
 ## Why

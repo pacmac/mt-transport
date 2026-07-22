@@ -102,5 +102,66 @@ express, not merely discouraged.
   Phase 1. Pass = the reply appears in mesh-gw's raw `/events` (the check that caught the failure),
   and `ackFailTotal` stays flat while `pendingAckId` clears.
 
+## PHASE 2 — exact firmware changes (review before implementing)
+
+**1. `src/main.cpp` — include** (after `#include <MeshtasticTransport.h>`)
+```c
+#include <mt_pki.h>   // derive our PKC public key from the injected private key
+```
+
+**2. `src/main.cpp` — globals** (after `static uint32_t g_nodeNum = 0;`)
+```c
+static uint8_t g_pkiPublic[32] = {0};   // DERIVED at boot, published in NodeInfo
+static bool    g_pkiReady = false;
+```
+
+**3. `src/main.cpp` — `setup()`, after `applyRxSensitivityPatch("begin")`**
+```c
+if (ok && mesh.setPkiIdentity(MESH_PKI_PRIVATE_KEY)) {
+    g_pkiReady = mt::pkiPublicFromPrivate(g_pkiPublic, MESH_PKI_PRIVATE_KEY);
+    DBG("PKI: pub %02x%02x..%02x derive=%s peer=%s\n", g_pkiPublic[0], g_pkiPublic[1],
+        g_pkiPublic[31], g_pkiReady ? "OK" : "FAIL",
+        mesh.addPkiPeer(MESH_PKI_PEER_NODE, MESH_PKI_PEER_PUBLIC_KEY) ? "OK" : "FAIL");
+}
+```
+
+**4. `src/main.cpp` — `sendNodeInfo()`, replacing the `is_unmessagable` block (~line 1233)**
+```c
+// PKC is MUTUAL: without our public key the gateway cannot decrypt anything we
+// send, and refuses to send us a DM at all (Router.cpp:750).
+if (g_pkiReady) { u.public_key.size = 32; memcpy(u.public_key.bytes, g_pkiPublic, 32); }
+u.has_is_unmessagable = true;
+u.is_unmessagable = !g_pkiReady;   // was hard true; we ARE messagable once PKI is up
+```
+
+**5. `src/main.cpp` — comfort flag** (`handleCommand`, at `char reply[237];`)
+```c
+bool comfort = false;              // set true in the `ping` and `status` branches
+```
+
+**6. `src/main.cpp` — reply send (~line 2223), replacing `if (reply[0]) sendReply(reply, rx.id);`**
+```c
+if (reply[0]) {
+    bool sent = false;
+    if (comfort && rx.from != mt::BROADCAST_ADDR)
+        sent = mesh.sendPki(meshtastic_PortNum_TEXT_MESSAGE_APP, (const uint8_t *)reply,
+                            strlen(reply), rx.from, 3, rx.id, rx.id, /*wantAck=*/true);
+    if (sent) report("REPLY pki", true);
+    else      sendReply(reply, rx.id);   // fallback: unknown peer / non-comfort verb
+}
+```
+
+**7. `src/main.cpp` — `FW_VERSION` → `2-260722-5`.**
+
+**8. `docs/spec-nodeinfo-unmessagable.md`** — record that its premise ("we do not implement
+PKI... a fake key is off the table") is now void: we implement PKI and publish a REAL derived
+key, so `is_unmessagable` follows `g_pkiReady` instead of being hard-coded true.
+
+**NOT changed:** `platformio.ini` (the lib requirement note already landed in Phase 1),
+`secrets.h` (keys already present, gitignored).
+
+**Risk:** flash grows ~75 KB once Curve25519 links in (34.8%, measured). Bench only; field unit
+untouched.
+
 ## Out of scope
 Key exchange/discovery via NodeInfo (D1b.2 injects instead), XEdDSA signing, admin-key handling.

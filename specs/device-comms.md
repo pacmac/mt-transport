@@ -6,6 +6,15 @@ scope:
   - specs/device-comms.md
 ---
 
+> ### ⚠ SUPERSEDED 2026-07-22 — the I2C camera transport NO LONGER EXISTS
+> The camera link is **UART only**. All I2C code (`buildInfo`/`onReceive`/`onRequest`,
+> `Wire`, `I2C_ADDR`, `g_out`), every `CAM_UART` `#ifdef`, and the second build env were
+> **deleted** — see `specs/strip-cam-i2c.md`. It was already failing to compile.
+>
+> Anything below describing an I2C path as *retained*, a *fallback*, *untouched*, or a
+> live `#else` branch is **HISTORICAL AND FALSE**. Do not act on it. Do not reintroduce
+> I2C: one transport, one build env, deliberately.
+
 # Device comms: how to talk to and monitor the units over the mesh
 
 This is the standing rig. It has been the comms + monitoring path for weeks — do
@@ -213,10 +222,21 @@ from the bench.** Consequences, all verified this session:
 - **Transport:** UART, RAK `Serial1` (15/16) ↔ camera Grove **G4/G13**, 115200,
   framed `[7E][len][payload][crc16-CCITT]`. Verified TX/RX orientation: camera
   `CAM_UART_RX=13, TX=4`; raw `0x55`→`0xAA` ping returns `AA` (`camu ping`).
-- **Was I2C** (camera as slave 0x62 on the same Grove pins). The I2C path is retained
-  as a build fallback (default `timercam` / `rak4631` envs) but the bench is now wired
-  for UART, so I2C cannot reach the camera until rewired back.
-- **nRF verbs (CAM_UART build):** `camu ping` (raw link), `camu count`, `camu cap`.
+- **Was I2C** (camera as slave 0x62 on the same Grove pins) until 2026-07-21. That path
+  is **GONE as of 2026-07-22** — code, `#ifdef`s and the second build env all deleted
+  (`specs/strip-cam-i2c.md`). It is not a fallback and cannot be selected; it had also
+  stopped compiling. Both projects now have exactly ONE env: `timercam` and
+  `rak4631_camuart`. Do not reintroduce it.
+- **nRF verbs:** `camu ping` (raw link), `camu count`, `camu cap`.
+- **Camera sleep is the CAMERA's job**, not the RAK's: it self-sleeps after
+  `IDLE_SLEEP_MS` (3 s) of no CRC-valid frame, so a power-up, a stray wake, or a RAK
+  that dies mid-grab all self-heal. Do not add RAK-side "sleep the camera" logic —
+  every byte on the link is itself a wake pulse, so it would wake the camera in order
+  to tell it to sleep (`specs/cam-sleep-assert.md`).
+- **A dead camera does not take the RAK down.** The grab is an async state machine with
+  a deadline on every state; it gives up in ≤9 s with `{"type":"err","st":255}` and the
+  mesh keeps running. Caveat: the `camu` bench verbs use the BLOCKING reader, so
+  `camu cap` stalls `loop()` up to 3 s (`camu count` 500 ms) when the camera is absent.
 
 ## Hard rules (do not violate)
 
