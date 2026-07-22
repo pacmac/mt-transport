@@ -487,11 +487,21 @@ void MeshtasticTransport::handleRxDone()
     if (isPki) {
         // Needs the sender's public key; an unknown peer is not decryptable, and a
         // failed auth tag must yield NOTHING (pkiDecrypt enforces both).
+        // A PKC packet we cannot decrypt is dropped HERE, before the application ever
+        // sees it — so without these counters a REJECTED DM and a DM that never
+        // arrived are indistinguishable (both are silence). That ambiguity is exactly
+        // what made the inbound path undebuggable, so record why we dropped it.
         const uint8_t *peer = pkiPeerKey(h.from);
-        if (!_pkiHavePriv || !peer)
+        _pkiLastFrom = h.from;
+        if (!_pkiHavePriv || !peer) {
+            _pkiRxNoKey++;   // sender's public key unknown — nothing else to try
             return;
-        if (!pkiDecrypt(h.from, peer, _pkiPriv, h.id, raw + sizeof(h), plainLen, plain, &plainLen))
+        }
+        if (!pkiDecrypt(h.from, peer, _pkiPriv, h.id, raw + sizeof(h), plainLen, plain, &plainLen)) {
+            _pkiRxAuthFail++; // wrong key, or a forged/corrupt frame
             return;
+        }
+        _pkiRxOk++;
     } else if (!ctrCrypt(_ch.psk, _ch.pskLen, h.id, h.from, raw + sizeof(h), plain, plainLen)) {
         return;
     }

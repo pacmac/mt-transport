@@ -151,6 +151,16 @@ public:
     void setAckTimeoutMs(uint32_t ms) { _ackTimeoutMs = ms; }
     void setAckMaxAttempts(uint8_t n) { _ackMaxAttempts = n ? n : 1; }
 
+    // PKC RECEIVE diagnostics. A PKC packet that cannot be decrypted is dropped
+    // inside handleRxDone(), before the application sees anything — so a REJECTED DM
+    // looks exactly like one that never arrived. These make the two distinguishable,
+    // which is the difference between debugging and guessing. The library still does
+    // no logging of its own; the app reports these.
+    uint32_t pkiRxOk() const { return _pkiRxOk; }             // decrypted successfully
+    uint32_t pkiRxNoKey() const { return _pkiRxNoKey; }       // sender's public key unknown
+    uint32_t pkiRxAuthFail() const { return _pkiRxAuthFail; } // wrong key / forged frame
+    uint32_t pkiLastFrom() const { return _pkiLastFrom; }     // sender of the last PKC packet seen
+
     // Introspection for oracles/tests and app diagnostics.
     uint32_t pendingAckId() const { return _pendingId; }        // 0 = no reliable send outstanding
     uint32_t ackRetransmits() const { return _ackRetransmits; } // cumulative retransmit frames sent
@@ -286,6 +296,7 @@ private:
     uint8_t  _ackMaxAttempts = 3;
     uint32_t _ackRetransmits = 0;     // cumulative
     uint32_t _ackFailTotal = 0;       // cumulative (exhausted or superseded)
+    uint32_t _pkiRxOk = 0, _pkiRxNoKey = 0, _pkiRxAuthFail = 0, _pkiLastFrom = 0;
 
     bool _rxActive = false;       // radio currently in RX (survives short polls)
 
