@@ -74,9 +74,16 @@ public:
     // The frame leaves the antenna later, driven by service() (scheduled send +
     // async CAD + startTransmit). Returns false on encode/size/crypto error or a
     // full queue; true means "accepted for transmission", not "on air yet".
+    //
+    // wantAck (v2 reliability): when true AND this is a directed send (to !=
+    // BROADCAST_ADDR), the want_ack flag is set and the transport auto-retransmits
+    // the frame (verbatim, same id) until a matching ROUTING_APP ACK arrives or the
+    // attempt budget is spent — see setAckTimeoutMs/setAckMaxAttempts. On a broadcast
+    // the flag is silently dropped: broadcasts are never ACKed (the mesh floods them),
+    // so requesting an ACK is meaningless. Default false keeps v1 callers unchanged.
     bool send(uint32_t portnum, const uint8_t *payload, size_t len,
               uint32_t to = BROADCAST_ADDR, uint8_t hopLimit = 3,
-              uint32_t requestId = 0, uint32_t replyId = 0);
+              uint32_t requestId = 0, uint32_t replyId = 0, bool wantAck = false);
 
     // The pump. Call once every loop() pass. NEVER blocks — no delay(), no spin.
     // Services one radio interrupt if one fired (RX-done → decode+queue, TX-done
@@ -111,6 +118,21 @@ public:
     // caught the first copy dedupe this one, so exactly one message surfaces.
     // Use to shore up one-shot replies on lossy links.
     bool resend();
+
+    // v2 reliability config (RAM-only, not persisted — a reboot restores defaults,
+    // so a test value can never silently outlive a test). A directed want_ack send
+    // is retransmitted every timeoutMs until ACKed, for at most maxAttempts total
+    // transmissions (the original counts as attempt 1). Defaults 4000 ms / 3 — worst
+    // case ~12 s, inside the observed reply tolerance.
+    void setAckTimeoutMs(uint32_t ms) { _ackTimeoutMs = ms; }
+    void setAckMaxAttempts(uint8_t n) { _ackMaxAttempts = n ? n : 1; }
+
+    // Introspection for oracles/tests and app diagnostics.
+    uint32_t pendingAckId() const { return _pendingId; }        // 0 = no reliable send outstanding
+    uint32_t ackRetransmits() const { return _ackRetransmits; } // cumulative retransmit frames sent
+    // Reliable sends that ended WITHOUT a confirmed ACK: attempts exhausted, OR
+    // superseded by a newer reliable send before this one was ACKed (single-slot).
+    uint32_t ackFailTotal() const { return _ackFailTotal; }
 
     // True while a transmission is queued or in flight — the send path is async
     // now, so this actually means something (unlike the old blocking transmit()).
@@ -228,6 +250,19 @@ private:
     uint8_t _frame[FRAME_CAP];    // introspection: the most recently built frame
     size_t  _frameLen = 0;
 
+    // v2 reliable-send pending slot: ONE outstanding directed want_ack send. Its
+    // own frame copy — _frame above is overwritten by any later send(), so the
+    // retransmit must NOT reuse it. _pendingId 0 = slot empty (send() forces id != 0).
+    uint8_t  _pendingFrame[FRAME_CAP];
+    size_t   _pendingLen = 0;
+    uint32_t _pendingId = 0;
+    uint32_t _pendingDeadline = 0;    // millis() when the next retransmit is due
+    uint8_t  _pendingAttempts = 0;    // transmissions so far (original = 1)
+    uint32_t _ackTimeoutMs = 4000;
+    uint8_t  _ackMaxAttempts = 3;
+    uint32_t _ackRetransmits = 0;     // cumulative
+    uint32_t _ackFailTotal = 0;       // cumulative (exhausted or superseded)
+
     bool _rxActive = false;       // radio currently in RX (survives short polls)
 
     // DIO1 interrupt. RadioLib's setDio1Action takes a plain void(*)(void), so the
@@ -290,6 +325,7 @@ private:
     void handleRxDone();          // read one frame off the radio, decode, queue it
     bool pushRx(const RxPacket &p);
     bool enqueueFrame(const uint8_t *frame, size_t len); // copy into the TX ring
+    void serviceAck();            // v2: retransmit the pending want_ack frame on timeout
     void driveTx();               // advance the TX state machine (timing)
     void startSending();          // startTransmit() the head item (+ airtime accounting)
 };

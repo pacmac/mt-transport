@@ -81,7 +81,7 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
 
 bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
                                size_t len, uint32_t to, uint8_t hopLimit,
-                               uint32_t requestId, uint32_t replyId)
+                               uint32_t requestId, uint32_t replyId, bool wantAck)
 {
     if (!_radio || len > sizeof(meshtastic_Data_payload_t::bytes))
         return false;
@@ -114,11 +114,16 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
 
     if (_hopOverride) hopLimit = _hopOverride;   // test override (setHopOverride) — forces every frame
 
+    // want_ack is meaningful only for a directed send. A broadcast is never ACKed
+    // (the mesh floods it), so requesting one is a no-op — drop the flag rather than
+    // arm a retransmit that can never be satisfied.
+    const bool reliable = wantAck && to != BROADCAST_ADDR;
+
     PacketHeader h;
     h.to = to;
     h.from = _nodeNum;
     h.id = id;
-    h.flags = packFlags(hopLimit, hopLimit); // hop_start = hop_limit at origin
+    h.flags = packFlags(hopLimit, hopLimit, reliable); // hop_start = hop_limit at origin
     h.channel = _hash;
     h.next_hop = 0;
     h.relay_node = 0;
@@ -132,6 +137,20 @@ bool MeshtasticTransport::send(uint32_t portnum, const uint8_t *payload,
     _lastId = id;
     memcpy(_frame, f, frameLen);
     _frameLen = frameLen;
+
+    // Arm the single pending-ack slot for a reliable send. Its OWN copy of the
+    // frame — _frame is overwritten by the next send(), so the retransmit cannot
+    // depend on it. A reliable send while one is still outstanding SUPERSEDES it
+    // (single slot, by design): count the abandoned one as a non-confirmed send.
+    if (reliable) {
+        if (_pendingId != 0)
+            _ackFailTotal++;                 // superseded before it was ACKed
+        memcpy(_pendingFrame, f, frameLen);
+        _pendingLen = frameLen;
+        _pendingId = id;
+        _pendingAttempts = 1;                // this transmission is attempt 1
+        _pendingDeadline = millis() + _ackTimeoutMs;
+    }
     return true;
 }
 
@@ -388,6 +407,17 @@ void MeshtasticTransport::handleRxDone()
     if (!pb_decode(&is, meshtastic_Data_fields, &data))
         return; // wrong PSK garbage decodes to noise; protobuf catches it
 
+    // v2 reliability: a ROUTING_APP packet whose request_id matches our outstanding
+    // reliable send IS the ACK — clear the pending slot so serviceAck() stops
+    // retransmitting. Done before the dedupe check so the FIRST sighting clears it
+    // (a mesh-duplicated ACK arriving later is then a harmless no-op). The packet is
+    // still delivered to poll() below; the app may want to observe the ACK.
+    if (_pendingId != 0 && data.portnum == meshtastic_PortNum_ROUTING_APP &&
+        data.request_id == _pendingId) {
+        _pendingId = 0;
+        _pendingLen = 0;
+    }
+
     if (isDuplicate(h.from, h.id))
         return; // ReliableRouter retries land here
 
@@ -443,7 +473,35 @@ void MeshtasticTransport::service()
         }
     }
 
+    serviceAck(); // v2: re-enqueue the pending want_ack frame if its ACK is overdue
     driveTx();
+}
+
+// Retransmit-on-timeout driver for the single reliable-send slot. Non-blocking:
+// re-enqueues the stored frame verbatim (same id, so receivers that caught an
+// earlier copy dedupe it) and lets driveTx() carry it. Gives up — and records the
+// failure — once the attempt budget is spent, so a reliable send can never
+// retransmit forever.
+void MeshtasticTransport::serviceAck()
+{
+    if (_pendingId == 0)
+        return; // nothing outstanding
+    if ((int32_t)(millis() - _pendingDeadline) < 0)
+        return; // ACK still within its window
+    if (_pendingAttempts >= _ackMaxAttempts) {
+        _ackFailTotal++;      // budget spent, never ACKed
+        _pendingId = 0;
+        _pendingLen = 0;
+        return;
+    }
+    // Re-enqueue verbatim. If the TX ring is momentarily full, leave the deadline
+    // in the past and try again next pass — do NOT burn an attempt on a frame that
+    // never entered the queue.
+    if (enqueueFrame(_pendingFrame, _pendingLen)) {
+        _pendingAttempts++;
+        _ackRetransmits++;
+        _pendingDeadline = millis() + _ackTimeoutMs;
+    }
 }
 
 bool MeshtasticTransport::isDuplicate(uint32_t from, uint32_t id)
