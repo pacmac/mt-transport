@@ -1,6 +1,6 @@
 # mt-transport v2 — scope & rationale
 
-**Status:** design agreed, contract drafted. **No firmware changed yet.** These docs are the
+**Status:** contract **frozen at v2.0** (2026-07-22, Phase 0 done). **No firmware changed yet.** These docs are the
 source of truth; the wire contract lives in [`APIV2.md`](./APIV2.md). node-dash symlinks this
 directory. xsession is now for **ambiguities/clarifications only** — not for carrying the
 contract.
@@ -29,13 +29,14 @@ Two structural faults fall out of that:
 ## The v2 model — two lanes
 
 ### 1. Comfort lane (human-facing)
-`ping`, `status` (and possibly `env`) stay **plain text**, but are sent as **direct messages**
+`ping` and `status` stay **plain text**, but are sent as **direct messages**
 (`to = rx.from`, `want_ack`). One round-trip, human-readable in a phone/chat client, and now
-**acked + retried** on loss.
+**acked + retried** on loss. (`env` is *not* comfort — its reading is structured data, so it
+rides the machine lane.)
 
 ### 2. Machine lane (everything else)
-`config`, `schema`, `debug`, `calc`, and images are **chunked, always** — even a 40-byte
-`config` — on **one private port**. Rationale:
+`env`, `config`, `schema`, `debug`, `calc`, and images are **chunked, always** — even a 40-byte
+`config` — on **one private port (`261`)**. Rationale:
 
 - **One reliable code path.** No "does it fit one frame?" branching, ever.
 - **Truncation becomes impossible.** The chunk layer already carries a per-chunk CRC and a
@@ -49,9 +50,9 @@ frame. Accepted — uniformity and reliability over per-message efficiency.
 
 ## What changes, concretely
 See the change list in [`../../specs/v2-transport.md`](../../specs/v2-transport.md). In brief:
-`want_ack` + retransmit; one private port (260 retired as a response port); JSON responses
-published as chunk `ptype`s; `jsonBuild` size-shedding and `sch` pagination removed; `@xxxx`
-name addressing replaced by DM-to-nodeNum.
+`want_ack` + retransmit; one private port (`261` kept, `260` retired as a response port); JSON
+responses published under a single generic `JSON` chunk `ptype`; `jsonBuild` size-shedding and
+`sch` pagination removed; `@xxxx` name addressing replaced by DM-to-nodeNum.
 
 ## What v2 does NOT touch
 - **Channel-0 private-vs-primary config.** Independent decision at the channel/hash layer.
@@ -62,14 +63,18 @@ name addressing replaced by DM-to-nodeNum.
   portnums for phone / Meshtastic-native interop.
 - **Deployed `mylibs/mt-chunk`** on the un-reflashable field unit — v2 dev is bench-only.
 
-## Open decisions (yours — not assumed in these docs)
-1. **Port number:** keep `261`, or mint a fresh v2 port and retire both 260 and 261?
-2. **Comfort set:** `ping` + `status` only, or include `env`?
-3. **ptype granularity:** one generic `JSON` ptype for all machine responses, or a distinct
-   ptype per response class (`config`/`debug`/`calc`)?
-4. **Small responses:** pull (client asks) or push (device streams) as the default?
+## Frozen decisions (Phase 0 — 2026-07-22)
+The four contract questions are resolved; `APIV2.md` is stamped `v2.0` and carries no `TBD`.
 
-`APIV2.md` marks each of these **TBD** where it depends on the answer.
+1. **Port number → keep `261`** (`PAC_CHUNK_APP`); retire `260`. The chunk lane already lives
+   on `261` with an unchanged wire format — no new portnum to register on either end.
+2. **Comfort set → `ping` + `status` only.** `env` moves to the machine lane (structured data,
+   not a one-glance human line).
+3. **ptype granularity → one generic `JSON` ptype (`4`)** for every machine-lane JSON response;
+   the JSON's own `t` field names the specific response. `SCHEMA` (1) is superseded; `IMAGE` (2)
+   stays its own binary ptype.
+4. **Small responses → pull by default** — client asks, device manifests, client pulls and
+   reassembles. Push stays for images and unsolicited events, not command responses.
 
 ## Consumer libraries — we own the mesh, so consumers shouldn't have to know it
 
@@ -112,7 +117,7 @@ point behind everything.
 
 | phase | delivers | breaking? |
 |---|---|:--:|
-| **0** | **Freeze the contract** — resolve the 4 TBDs (port, comfort set, ptype granularity, pull-vs-push) and stamp APIV2 `v2.0`. Decisions only, no code. **Gates everything.** | — |
+| **0** ✅ | **Freeze the contract** — resolved the 4 TBDs (port, comfort set, ptype granularity, pull-vs-push) and stamped APIV2 `v2.0`. **Done 2026-07-22** (see "Frozen decisions" above). Gated everything. | — |
 | **1** | **Reliability layer** — `want_ack` + retransmit + DM addressing (`to=rx.from`). Transport-only, independently testable (force a drop, prove the retransmit). | no |
 | **2** | **Chunk-everything** — `config`/`debug`/`calc`/`schema` as chunk ptypes; lib verbs pull+reassemble. **Old 260 path stays live in parallel** — A/B-able. | no |
 | **3** | **Collapse to one port + retire `@xxxx`** (DM by nodeNum). First deliberately-breaking step. | **yes** |

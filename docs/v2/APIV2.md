@@ -6,9 +6,10 @@
 > the contract here *first* and then the code). Consumers may read this directly for context,
 > but should depend on a `clients/<lang>/` library rather than hand-rolling the protocol.
 
-The machine-readable contract for v2. Byte offsets and constants below are **verified against
-the current code** (`src/mt_wire.h`, `clients/node/lib/chunk.js`, `src/main.cpp`); items marked
-**TBD** await a decision (see [`README.md`](./README.md) "Open decisions"). Big-endian throughout.
+**Contract version: 2.0** — frozen 2026-07-22 (the four Phase-0 decisions are resolved below;
+no `TBD` remains). The machine-readable contract for v2. Byte offsets and constants below are
+**verified against the current code** (`src/mt_wire.h`, `clients/node/lib/chunk.js`,
+`src/main.cpp`). Big-endian throughout.
 
 ---
 
@@ -16,8 +17,8 @@ the current code** (`src/mt_wire.h`, `clients/node/lib/chunk.js`, `src/main.cpp`
 
 | port | role in v2 | notes |
 |---|---|---|
-| **1** (TEXT) | comfort lane | `ping`, `status` (`env`? TBD) — text, sent as DMs |
-| **V2_PORT** (TBD: keep `261`, or mint new) | machine lane | all chunked responses + images |
+| **1** (TEXT) | comfort lane | `ping`, `status` — text, sent as DMs |
+| **261** (`PAC_CHUNK_APP`) | machine lane | all chunked responses + images (kept from v1; wire format unchanged) |
 | 260 (`PAC_ALARM_APP`) | **RETIRED** as a response port | no more raw JSON frames |
 | `TELEMETRY`/`NODEINFO`/`POSITION` | unchanged | native Meshtastic interop |
 
@@ -95,13 +96,13 @@ Two disjoint blocks share the port; the first byte decides.
 
 | ptype | meaning | status |
 |---:|---|---|
-| 1 | `SCHEMA` | exists (reserved in v1) |
-| 2 | `IMAGE` | exists (camera JPEG) |
+| 1 | `SCHEMA` | v1 legacy — **superseded by `JSON` (4)** in v2; schema is now a `JSON` payload |
+| 2 | `IMAGE` | camera JPEG (binary) |
 | 3 | `LOG` | exists |
-| TBD | `config` / `debug` / `calc` | **v2** — either one per class, or a single generic `JSON` ptype (open decision) |
+| **4** | **`JSON`** | **v2 — the one generic ptype for every machine-lane JSON response** (`config`, `schema`, `debug`, `calc`, `env`). The JSON's own `t` field names the specific response; the consumer routes on `t`, not on the ptype. |
 
-**This is the whole of "chunk everything":** a JSON response (`config`/`schema`/`debug`/`calc`)
-becomes a payload with a `ptype`, published exactly like an image. No frame-format change.
+**This is the whole of "chunk everything":** a JSON response (`config`/`schema`/`debug`/`calc`/`env`)
+becomes a `JSON`-ptype payload, published exactly like an image. No frame-format change.
 
 ## 5. Comfort lane (text DMs)
 
@@ -112,9 +113,10 @@ Commands whose reply a human reads directly. Reply is a **text DM** back to `rx.
 |---|---|---|
 | `ping` | `pong` (text) | yes |
 | `status` | short status (text) | yes |
-| `env` | env reading (text) | **TBD** — comfort or machine? |
 
-Everything else (`config`, `schema`, `debug`, `calc`, image) → machine lane (§4).
+The comfort lane is exactly `ping` + `status`. Everything else — `env`, `config`, `schema`,
+`debug`, `calc`, image — goes to the machine lane (§4). `env` is machine-lane because its
+reading is structured data a consumer parses, not a one-glance human line.
 
 ## 6. Request / response flows
 
@@ -140,7 +142,9 @@ device    --(MANIFEST, then CHUNK × n, DM+want_ack)-> node-dash
 node-dash  (reassemble; request repair of any gap at the end)
 ```
 
-Whether a given machine response defaults to pull or push is **TBD** (§ README open decisions).
+**Default is pull:** the client asks (`GETMANIFEST`), the device manifests, the client pulls and
+reassembles (§6 "Machine, pull"). Push (device streams unsolicited) stays for images and
+event-driven payloads (motion / alarm), **not** for command responses.
 
 ## 7. Removed in v2
 - Raw JSON frames on port 260.
