@@ -96,6 +96,59 @@ clients/
   The firmware defines the wire; each lib proves it matches; APIV2 documents it.
 - **Distribution (npm/pip vs path-load) is not decided yet** — out of scope for now.
 
+## Delivery plan — phased, tested, reversible
+
+Each phase is a self-contained, tested slice built **bottom-up**. v2 runs **alongside v1**
+until the deliberate breaking phases, so nothing is taken away until its replacement is proven
+(the pattern push already uses beside pull). `pre-v2` (tagged across all repos) is the rollback
+point behind everything.
+
+**Governing rules for every phase:**
+- One `/idiot` task + spec; no phase touches code outside its spec.
+- A phase lands **both ends** — firmware *and* the nodejs lib — plus its tests. "Done" is never
+  all-firmware-then-all-lib; APIV2 binds them, so they move together.
+- **Layered testing:** offline codec/fixtures (no radio) → single bench device → on-air.
+- Bench `!8cee336b` only. Field unit `!987ab80f` untouched until the final cutover.
+
+| phase | delivers | breaking? |
+|---|---|:--:|
+| **0** | **Freeze the contract** — resolve the 4 TBDs (port, comfort set, ptype granularity, pull-vs-push) and stamp APIV2 `v2.0`. Decisions only, no code. **Gates everything.** | — |
+| **1** | **Reliability layer** — `want_ack` + retransmit + DM addressing (`to=rx.from`). Transport-only, independently testable (force a drop, prove the retransmit). | no |
+| **2** | **Chunk-everything** — `config`/`debug`/`calc`/`schema` as chunk ptypes; lib verbs pull+reassemble. **Old 260 path stays live in parallel** — A/B-able. | no |
+| **3** | **Collapse to one port + retire `@xxxx`** (DM by nodeNum). First deliberately-breaking step. | **yes** |
+| **4** | **Remove dead code** — `jsonBuild` shedding, `sch` pagination, old 260 sends — only after 2/3 proven, only after grepping every caller. | **yes** |
+| **5** | **Conformance + coordinated cutover** — full fixture conformance, bench e2e, one-shot device+node-dash field cutover. | **yes** |
+
+## Test strategy — cumulative, contract-based, no-hallucinate
+
+Regression safety is **structural, not a promise.** Built on the existing
+`clients/node/test/` harness (`run.js`, `cross-cpp.js`, `offline-*`, `onair-*`, `npm test`).
+
+**Two tiers, both cumulative:**
+
+| tier | against | determinism | runs |
+|---|---|---|---|
+| **Offline** | recorded fixtures + codec, no radio | 100% deterministic | every run, every phase — the regression backbone |
+| **On-air** | bench `!8cee336b` | real, lossy | each phase boundary + before cutover |
+
+**Rules that make it a real net:**
+1. **Cumulative & phase-tagged (`P1…P5`).** A later phase runs the **full** prior suite; Phase 3's
+   port-collapse must keep P1/P2 green or it fails.
+2. **Assert the CONTRACT, not the mechanism.** A test says *"a valid `status` object is
+   retrievable"*, never *"status arrives on port 260."* That is what lets the suite survive the
+   breaking phases — the capability is stable even when the mechanism changes.
+3. **No-hallucinate.** Assertions are on **decoded bytes / parsed objects / causal side effects**,
+   never timing. Every phase closes with the test **run and its real output shown**.
+4. **Idempotent.** Setup/teardown restores any state touched (persisted config, hop override), so
+   it re-runs safely any number of times. On-air tests are loss-aware (retry within the ack
+   window / report loss explicitly) so real radio loss is never a flaky false-fail.
+5. **One command.** `npm test` = full offline suite; a tagged runner drives the on-air tier.
+6. **Conformance = the lockstep guarantee.** Firmware generates fixtures; the lib must decode them
+   identically (`cross-cpp.js` is the model). Firmware and lib cannot drift without a red test.
+
+**A phase is "done" only when:** its new tests pass **AND** the full accumulated offline suite is
+green **AND** the on-air suite passes on the bench — all with output shown.
+
 ## Deployment
 Breaking, coordinated cutover: a device/node-dash protocol mismatch = total comms loss, so
 both sides flip together. Bench `!8cee336b` during dev; field unit `!987ab80f` untouched.
