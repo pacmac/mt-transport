@@ -63,8 +63,14 @@ wrong *board*, which is a different (and still live) hazard.
   [[cam-sleep-assert]] and is its own task.
 
 ## Test
-- `pio run` builds ONE env, SUCCESS, with no `CAM_UART` in the flags.
+- `pio run` builds ONE env, SUCCESS, with no `CAM_UART` in the flags. **DONE** — single env
+  `timercam`, flash 428421 -> 411613 bytes (-16.8 KB), -240 lines.
 - `grep -c "Wire\.\|I2C\|CAM_UART" src/main.cpp` → only the `CAM_UART_RX/TX` pin defines remain.
-- Functional proof deferred: the TimerCam's USB is disconnected (Peter removed it deliberately
-  on 2026-07-22 after it was flashed with nRF firmware by mistake), so this cannot be flashed or
-  run on hardware until it is plugged back in. Build-only verification until then.
+- **Flashed and verified on hardware 2026-07-22** (`Hash of data verified`): the camera boots,
+  brings up the UART link, self-sleeps, wakes on EXT0 and serves a complete 16-chunk grab
+  (crc 3C893728 matching on both sides). The UART transport is provably intact after removing
+  I2C. Detail in `specs/cam-sleep-assert.md`.
+- Historical note: the TimerCam's USB was disconnected (Peter unplugged it deliberately to
+  remove the ambiguity between the two USB serial devices, NOT because it was damaged — it
+  completed a full `cam grab` that same evening). **Reconnected 2026-07-22 18:45**; flash and
+  on-hardware verification now possible.

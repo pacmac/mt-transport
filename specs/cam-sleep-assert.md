@@ -88,16 +88,45 @@ task.
 capture logic, and queue/max-hold behaviour are untouched.
 
 ## Test
-- Build compiles. DONE: single env, `SUCCESS`.
-- Power-cycle with the RAK silent → LED goes out ~3 s later, with no grab and no RAK
-  involvement. NOT DONE — needs the TimerCam USB reconnected.
-- `@336b cam grab` still completes end to end (13 chunks) — the stamps must keep it awake for
-  the whole grab, which is the one thing the watchdog could plausibly break. **This is the
-  gating test**: 3 s is deliberately close to the RAK's 2 s `WAIT_SEEK`, so if the margin is
-  wrong at all it shows up here as a failed or truncated grab. NOT DONE.
-- Grab interrupted (reset the RAK mid-transfer) → camera sleeps ~3 s later on its own. NOT DONE.
+ALL VERIFIED ON HARDWARE 2026-07-22 (flashed, `Hash of data verified`).
+
+**1. Self-sleep from a cold boot, with no RAK involvement — PASS.** Reset pulsed via RTS,
+captured with DTR/RTS deasserted so the open neither resets nor holds the board:
+```
+ 0.77s  === timercam-chunk === wake=0 psram=4194304     <- POWERON_RESET, cold boot
+ 1.14s  uart link on RX=13 TX=4 @115200                 <- last stamp (end of setup)
+ 4.15s  idle 3004ms — sleeping
+ 4.15s  sleeping; wake = RAK pulls Grove SCL low
+```
+3004 ms after the final stamp. Before this change that boot left the camera awake and lit
+indefinitely.
+
+**2. A full grab still completes — PASS. This was the gating test**, because 3 s sits
+deliberately close to the RAK's 2 s `WAIT_SEEK`; a wrong margin would show up here as a failed
+or truncated transfer. `@336b cam grab` on the private channel:
+```
+camera:  4.71s  rst:0x5 (DEEPSLEEP_RESET)       <- it WAS asleep (watchdog put it there)
+         5.33s  === timercam-chunk === wake=2   <- wake=2 = EXT0, woken by the RAK
+         5.93s  capture OK id=2977 len=3593 crc=3C893728 qn=1 in 211ms
+         6.35s  sleeping; wake = RAK pulls Grove SCL low
+RAK →   {"type":"grab","pid":2977,"len":3593,"n":16,"crc":"3C893728","bat":5540,"cam":"asleep"}
+```
+The CRC matches on both sides independently, and `reply_id` correlated to the sent packet
+(313523150). Full cycle proven: self-slept → woke on demand → served the whole grab → slept.
+
+Note the 6.35 s sleep is `CMD_SLEEP` from `camGrabFinish()`, not the watchdog (which would be
+3 s) — so both paths work and neither pre-empts the other.
+
+**3. Not separately tested:** the RAK-dies-mid-grab case. It shares the exact mechanism proven
+in (1) — the stamp ages out and the same code path runs — so it is covered by construction
+rather than by observation. Stated plainly rather than claimed as tested.
 
 ## Dependency
-Flashing this needs the TimerCam's USB reconnected — Peter removed it intentionally on
-2026-07-22 after it was flashed with nRF firmware by mistake. Build can be verified without it;
-flash and on-hardware test cannot.
+Flashing needs the TimerCam's USB connected. Peter disconnected it deliberately on 2026-07-22
+to remove the ambiguity between the two USB serial devices while I was repeatedly opening the
+wrong one. **Reconnected 2026-07-22 18:45**, so this is now testable.
+
+Do not record that the camera was "flashed with nRF firmware by mistake" — an earlier draft of
+this spec said so and it is FALSE. The camera completed a full `cam grab` (2891 B, 13 chunks,
+CRC verified) that same evening; it was never damaged. The real hazard was the port confusion,
+which is why `upload_port` is pinned to the by-id path.
