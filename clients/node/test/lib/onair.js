@@ -35,16 +35,33 @@ async function getMessages(host) {
   return Array.isArray(d) ? d : (d.messages || d);
 }
 
-async function sendCmd(host, gw, text, channel) {
+// `to` (node number) makes this a DM, which is the ONLY way an ack can happen:
+// MESSAGES_SPEC.md:105 — "Broadcasts reach `sent` and stay there… DMs proceed from
+// `sent` to `acked`, `failed`, or `no_ack`." Omitting `to` is why every earlier run
+// reported no_ack_needed: the test never asked for the ack it was meant to verify.
+async function sendCmd(host, gw, text, channel, to) {
+  const body = { text, channel };
+  if (to != null) body.to = to;
   const r = await fetch(`http://${host}/${gw}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, channel }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`POST -> ${r.status}`);
   const j = await r.json();
   if (j.id == null) throw new Error(`gateway returned no packet id: ${JSON.stringify(j)}`);
   return j.id >>> 0;
+}
+
+// Delivery state of our OUTBOUND command, found by packet id. `acked` per
+// MESSAGES_SPEC.md:99 = ROUTING_APP with matching request_id and error_reason 0 —
+// the same condition the transport implements, so test and firmware agree.
+async function findOutboundStatus(host, packetId) {
+  const msgs = await getMessages(host);
+  let best = null;
+  for (const m of msgs)
+    if (((m.packet_id || 0) >>> 0) === packetId && (!best || (m.id || 0) > best.id)) best = m;
+  return best ? best.status : null;
 }
 
 // Pull the device-reported uptime / firmware out of a JSON reply, when present.
@@ -76,9 +93,12 @@ async function runCommands(opts) {
     const text = `@${o.target} ${o.verb}`;
     const sentAt = Date.now();
     let packetId = null, sendErr = null;
-    try { packetId = await sendCmd(o.host, o.gw, text, o.channel); }
+    try { packetId = await sendCmd(o.host, o.gw, text, o.channel, o.sendAsDm ? o.targetNode : null); }
     catch (e) { sendErr = e.message; }
-    recs.push({ seq, text, packetId, sentAt, sendErr, reply: null, verdict: null });
+    // ack latency (mesh confirming OUR command was delivered) is a different quantity
+    // from response latency (the device's reply arriving) — both are tracked.
+    recs.push({ seq, text, packetId, sentAt, sendErr, reply: null, verdict: null,
+                ackStatus: null, ackAt: null, ackLatency: null });
     if (seq < o.count) await sleep(o.intervalMs);
   }
 
@@ -116,11 +136,32 @@ async function runCommands(opts) {
     }
   };
 
+  const pollAcks = async () => {
+    for (const r of recs) {
+      if (r.packetId == null) continue;
+      if (r.ackStatus && r.ackStatus !== 'sent') continue; // terminal state reached
+      try {
+        const st = await findOutboundStatus(o.host, r.packetId);
+        if (st && st !== r.ackStatus) {
+          r.ackStatus = st;
+          if (st === 'acked' && r.ackAt == null) {
+            r.ackAt = Date.now();
+            r.ackLatency = r.ackAt - r.sentAt;
+          }
+        }
+      } catch { /* transient */ }
+    }
+  };
+
   while (Date.now() < deadline) {
     try { collect(await getMessages(o.host), false); } catch { /* transient */ }
-    if (recs.every((r) => r.reply || r.sendErr)) break;
+    await pollAcks();
+    const done = recs.every((r) => (r.reply || r.sendErr) &&
+                                   (!o.sendAsDm || (r.ackStatus && r.ackStatus !== 'sent')));
+    if (done) break;
     await sleep(o.pollMs);
   }
+  await pollAcks();
   // Post-window sweep: a reply that lands just after the window is LATE, not absent.
   // This is the exact boundary that produced a false "no reply" today.
   await sleep(1500);
@@ -138,6 +179,10 @@ async function runCommands(opts) {
       checks.push(`channel ${p.channel}, expected ${o.channel}`);
     if (o.expectTransport === 'dm' && !p.is_dm) checks.push('expected DM, got BROADCAST');
     if (o.expectTransport === 'broadcast' && p.is_dm) checks.push('expected BROADCAST, got DM');
+    // ACK assertion. no_ack_needed means we never ASKED for one (broadcast) — a FAIL
+    // when an ack is required, not a pass.
+    if (o.expectAck === 'acked' && r.ackStatus !== 'acked')
+      checks.push(`ack status '${r.ackStatus || 'none'}', expected 'acked'`);
     if (checks.length) { r.verdict = 'WRONG'; r.why = checks.join('; '); }
     else if (p.late) { r.verdict = 'LATE'; r.why = `arrived after the ${o.windowMs} ms window`; }
     else r.verdict = 'OK';
@@ -160,27 +205,32 @@ function report(res) {
   const lat = got.map((r) => r.reply.latency).sort((a, b) => a - b);
   const avg = lat.length ? Math.round(lat.reduce((a, b) => a + b, 0) / lat.length) : null;
 
-  console.log('\n  seq  cmd pkt      reply msg  reply_id     from        transport  ch  hops  snr/rssi     upt  latency  verdict');
+  console.log('\n  seq  cmd pkt      ack status      ack ms  reply msg  reply_id     from        transport  ch  snr/rssi    upt  resp ms  verdict');
   for (const r of recs) {
     const p = r.reply;
     const tr = p ? (p.is_dm ? 'DM' : 'BROADCAST') : '—';
     console.log(
       `  #${String(r.seq).padEnd(3)} ${r.packetId != null ? hex(r.packetId) : '—'.padEnd(10)}  ` +
+      `${String(r.ackStatus || '—').padEnd(14)}  ` +
+      `${(r.ackLatency != null ? String(r.ackLatency) : '—').padStart(6)}  ` +
       `${p ? String(p.msgId).padEnd(9) : '—'.padEnd(9)}  ${p ? hex(p.replyId) : '—'.padEnd(10)}  ` +
       `${p ? String(p.from_num).padEnd(10) : '—'.padEnd(10)}  ${tr.padEnd(9)}  ` +
       `${p && p.channel != null ? String(p.channel).padEnd(2) : ' —'}  ` +
-      `${p && p.hops != null ? String(p.hops).padEnd(4) : '  — '}  ` +
-      `${p ? `${p.snr ?? '—'}/${p.rssi ?? '—'}`.padEnd(11) : '—'.padEnd(11)}  ` +
+      `${p ? `${p.snr ?? '—'}/${p.rssi ?? '—'}`.padEnd(10) : '—'.padEnd(10)}  ` +
       `${p && p.upt != null ? String(p.upt).padStart(4) : '   —'}  ` +
-      `${p ? String(p.latency).padStart(6) + 'ms' : '     —  '}  ${r.verdict}` +
+      `${p ? String(p.latency).padStart(7) : '      —'}  ${r.verdict}` +
       (r.why ? `  (${r.why})` : ''));
   }
+  const ackLat = recs.filter((r) => r.ackLatency != null).map((r) => r.ackLatency).sort((a, b) => a - b);
+  const ackAvg = ackLat.length ? Math.round(ackLat.reduce((a, b) => a + b, 0) / ackLat.length) : null;
+  console.log(`\n  ACK latency min/avg/max : ${ackLat[0] ?? '—'}/${ackAvg ?? '—'}/${ackLat[ackLat.length - 1] ?? '—'} ms` +
+              `   (states: ${[...new Set(recs.map((r) => r.ackStatus || 'none'))].join(', ')})`);
 
   const sendOrder = recs.filter((r) => r.reply).map((r) => r.seq);
   const arrOrder = got.slice().sort((a, b) => a.reply.arrival - b.reply.arrival).map((r) => r.seq);
   const reordered = JSON.stringify(sendOrder) !== JSON.stringify(arrOrder);
 
-  console.log(`\n  latency min/avg/max : ${lat[0] ?? '—'}/${avg ?? '—'}/${lat[lat.length - 1] ?? '—'} ms`);
+  console.log(`  RESPONSE latency min/avg/max : ${lat[0] ?? '—'}/${avg ?? '—'}/${lat[lat.length - 1] ?? '—'} ms`);
   console.log(`  arrival order       : [${arrOrder.join(',')}]${reordered ? '  REORDERED vs send' : ''}`);
   console.log(`  duplicate replies   : ${duplicates.length}` +
               (duplicates.length ? `  (same reply_id seen again — retransmit/dupe)` : ''));

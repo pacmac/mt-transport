@@ -22,7 +22,13 @@
 //     --interval <ms>     spacing between sends     (default 2500)
 //     --timeout <ms>      window after the LAST send (default 10000)
 //     --expect <t>        broadcast | dm | any      (default any)
+//     --dm                send the command AS A DM  (required to get an ACK at all)
+//     --expect-ack <s>    acked | any               (default any)
 //     --help
+//
+// ACK: a broadcast command is never acked (status stays no_ack_needed) — that is not
+// the rig refusing, it is the test not asking. Use --dm to request one; ack latency is
+// reported separately from response latency, because they measure different things.
 //
 // NOTE on --count: reply latency grows with burst depth (measured 3.3s, 5.5s, ~10s
 // for a 3-command burst — the device TX queue draining, not link loss). Default is 1
@@ -58,11 +64,13 @@ const opts = {
   intervalMs: a.interval != null ? Number(a.interval) : 2500,
   windowMs: a.timeout != null ? Number(a.timeout) : 10000,
   expectTransport: a.expect || 'any',
+  sendAsDm: a.dm !== undefined,
+  expectAck: a['expect-ack'] || 'any',
 };
 
 (async () => {
   console.log(`onair-ping: @${opts.target} ${opts.verb} x${opts.count} via ${opts.gw} ` +
-              `ch${opts.channel} @ ${opts.host}  (window ${opts.windowMs}ms, expect ${opts.expectTransport})`);
+              `ch${opts.channel} @ ${opts.host}  (window ${opts.windowMs}ms, ${opts.sendAsDm ? "DM" : "broadcast"} send, expect transport=${opts.expectTransport} ack=${opts.expectAck})`);
   const res = await runCommands(opts);
   process.exit(report(res) ? 0 : 1);
 })().catch((e) => { console.error('ERROR:', e.message); process.exit(1); });

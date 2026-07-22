@@ -22,10 +22,29 @@ message, over the expected transport, in time, without the device restarting und
    expected, because it never inspected the transport. That is exactly how the PSK-DM failure
    masqueraded as a device fault for an hour.
 
+## ACK — the missing half (added 2026-07-22)
+The harness must REQUEST and MEASURE an ack. It did not, and that was the defect: every run
+showed `status='no_ack_needed'` because the command was sent as a **broadcast**, so no ack was
+ever asked for. Per `MESSAGES_SPEC.md:105`, "Broadcasts reach `sent` and stay there… DMs proceed
+from `sent` to `acked`, `failed`, or `no_ack`." Reliability cannot be tested over a broadcast.
+
+- **Send as a DM** — pass `to: <targetNode>` on `POST /{gw}/messages`. That is what requests the ack.
+- **Record the delivery state** of the outbound command: `sent` → `acked` | `failed` | `no_ack`
+  (`no_ack_needed` means we failed to ask, and is itself a FAIL when an ack is expected).
+- **Measure ACK latency separately from RESPONSE latency.** They are different things:
+  ack = the mesh confirming delivery of our command; response = the device's reply arriving.
+  Report both per command, plus min/avg/max for each.
+- **Assert per `MESSAGES_SPEC.md:99`**: `acked` means a ROUTING_APP with matching `request_id`
+  and `error_reason = 0`. This is the same condition the transport implements, so the test and
+  the firmware agree on what "acked" means.
+- `--expect-ack acked|any` — when `acked` is required, anything else (`no_ack`, `failed`,
+  `no_ack_needed`, still `sent` at timeout) is a FAIL with the actual state reported.
+
 ## What every command record must carry
 | group | fields | assertion |
 |---|---|---|
 | correlation | cmd `packet_id`, reply msg `id`, `reply_id`, `from_num` | `reply_id == packet_id` AND `from_num == target node` |
+| **ack** | outbound `status`, ack timestamp, **ack latency** | matches `--expect-ack`; timed from send |
 | transport | `to_num`, `is_dm`, `channel` | matches `--expect-transport` (broadcast\|dm\|any); channel MUST be 2, never 0 |
 | radio | `hop_limit`, `hops`, `snr`, `rssi` | reported (diagnostic, not pass/fail) |
 | timing | sent_at, reply_at, latency | in-window / LATE / absent — LATE is its own verdict, never "no reply" |
