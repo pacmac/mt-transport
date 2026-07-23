@@ -5,6 +5,7 @@ gw:
   port: 8000            # node-dash proxy fronts send + events
   sendPort: 8000
   eventsPath: /events
+  gatewayId: null       # REQUIRED for send — the BLE gateway node, e.g. "!2687afb1" (OMNI, channel 2)
 channel: 2             # never 0 (PRIMARY)
 logLevel: info         # silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides
 paths:

@@ -3,21 +3,25 @@
 // speak DOMAIN — nodes, detections, images, config, alerts — and know nothing of
 // ports, frames, chunks, channels, airtime or queues.
 //
-// Skeleton: every method is exported and empty (throws NotImplemented). Wiring
-// and shape only; bodies land in later phases (see specs/mesh-module.md).
+// Phase 3 (mesh-cli-live): the live vertical is wired — connect + command/ping/
+// status + nodes/node + basic model. Images/config/notify bodies land in their
+// own phases and still throw NotImplemented.
 'use strict';
 const { EventEmitter } = require('events');
 const errors = require('./lib/errors');
-const { ni } = errors;
+const { ni, MeshError } = errors;
 const settings = require('./lib/settings');
+const protocol = require('./lib/protocol');
 const { Gateway } = require('./lib/gw');
 const { Timing } = require('./lib/timing');
 const { Model } = require('./lib/model');
 const { Images } = require('./lib/images');
 const { Config } = require('./lib/config');
 const { Notifier } = require('./lib/notify');
+const log = require('./lib/log').log.child('mesh');
 
 const VERSION = require('./package.json').version;
+const PORT_ALARM = 260; // JSON: debug, config, adverts
 
 class Mesh extends EventEmitter {
   // opts merge into config (defaults < config.yaml < env < opts). channel!=0.
@@ -31,36 +35,83 @@ class Mesh extends EventEmitter {
     this.images = null;
     this.config = null;       // config DOMAIN (device settings), not app config
     this.notifier = null;
+    this.gwId = null;
+    this.channel = null;
   }
 
   // ---- lifecycle ----
-  async connect() { return ni('Mesh.connect'); }   // load config, open gw, wire events
-  async close() { return ni('Mesh.close'); }
+  async connect() {
+    this.cfg = settings.load(this.opts);
+    require('./lib/log').log.setLevel(this.cfg.logLevel);
+    this.gwId = this.cfg.gw.gatewayId;
+    if (!this.gwId) throw new MeshError('gw.gatewayId not configured — set it in config.yaml', 'ECONFIG');
+    this.channel = this.cfg.channel;
+    this.gw = new Gateway(this.cfg);
+    this.timing = new Timing(this.cfg.timing);
+    this.model = new Model();
+    this.gw.onEvent((ev) => this._onEvent(ev));
+    log.debug('connecting to gw %s (gwId %s, channel %d)', this.cfg.gw.host, this.gwId, this.channel);
+    await this.gw.connect();
+    return this;
+  }
 
-  // ---- events (typed, domain-level): 'node','detection','image-available','alert','error'
-  //      (inherited on/off/emit from EventEmitter; documented here as the contract)
+  async close() { if (this.gw) await this.gw.close(); }
 
-  // ---- live model (no I/O) ----
-  nodes() { return ni('Mesh.nodes'); }
-  node(id) { return ni('Mesh.node'); }
+  // Route a normalized gw event into replies (timing) and the model.
+  _onEvent(ev) {
+    if (ev.kind === 'text') {
+      const reply = protocol.parseReply(ev.text);
+      if (reply) { this.timing.onReply(reply); this.emit('reply', reply, ev.from); }
+      return;
+    }
+    if (ev.kind === 'app' && ev.portnum === PORT_ALARM) {
+      const obj = protocol.parse260(ev.payload);
+      this.model.apply({ from: ev.from, obj });
+      this.emit('node', this.model.node(ev.from));
+    }
+  }
+
+  // ---- events (typed, domain-level): 'node','reply','detection','image-available','alert','error'
+  //      (inherited on/off/emit from EventEmitter)
+
+  // ---- live model ----
+  async nodes() { return this._summaries(await this.gw.nodes(this.gwId)); }
+  async node(id) { return (await this.nodes()).find((n) => n.id === id || n.num === id) || null; }
+
+  // mesh-gw /{gwId}/nodes shape is UNVERIFIED live (gw busy) — normalize defensively.
+  _summaries(j) {
+    const list = Array.isArray(j) ? j : (j && Array.isArray(j.nodes) ? j.nodes : []);
+    return list.map((e) => ({
+      id: e.node_id || e.id || (e.num != null ? '!' + (e.num >>> 0).toString(16) : null),
+      num: e.num != null ? e.num : e.from_num,
+      name: e.long_name || (e.user && e.user.long_name) || e.short_name || null,
+      raw: e,
+    }));
+  }
 
   // ---- commands (module owns grammar + timing + correlation) ----
-  async command(node, verb, args) { return ni('Mesh.command'); }  // generic escape hatch
-  async ping(node) { return ni('Mesh.ping'); }
-  async status(node, domain) { return ni('Mesh.status'); }        // '', 'mem', 'alarm'
+  async command(node, verb, args = []) {
+    const a = Array.isArray(args) ? args : (args === '' || args == null ? [] : [args]);
+    const text = protocol.buildCommand(node, verb, a);
+    return this.timing.enqueue(
+      () => this.gw.sendText(this.gwId, text, { channel: this.channel }),
+      { match: (r) => r && typeof r === 'object', dedupKey: `${node}|${verb}|${text}` });
+  }
+  async ping(node) { return this.command(node, 'ping'); }
+  async status(node, domain) { return this.command(node, 'status', domain ? [domain] : []); }
 
-  // ---- images (hides chunk/push/timing) ----
+  // ---- images (mesh-images phase) ----
   async listImages(node) { return ni('Mesh.listImages'); }
-  async getImage(node, pid, opts) { return ni('Mesh.getImage'); } // -> Buffer
-  startImageListener() { return ni('Mesh.startImageListener'); }  // passive push catch
+  async getImage(node, pid, opts) { return ni('Mesh.getImage'); }
+  startImageListener() { return ni('Mesh.startImageListener'); }
 
-  // ---- config (schema-validated) ----
+  // ---- config (mesh-config phase) ----
   async getSchema(node) { return ni('Mesh.getSchema'); }
   async getConfig(node) { return ni('Mesh.getConfig'); }
-  async setConfig(node, patch) { return ni('Mesh.setConfig'); }   // validate then send
+  async setConfig(node, patch) { return ni('Mesh.setConfig'); }
 
-  // ---- alerts ----
-  startAlertListener() { return ni('Mesh.startAlertListener'); }  // -> 'alert' events -> notifier
+  // ---- alerts (notify phase) ----
+  startAlertListener() { return ni('Mesh.startAlertListener'); }
 }
 
 // factory

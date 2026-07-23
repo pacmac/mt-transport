@@ -57,7 +57,7 @@ async function main() {
   if (flags.help || !match) { console.log(usage()); process.exit(match ? 0 : 1); }
 
   const m = new Mesh({ gw: flags.gw, channel: flags.channel != null ? Number(flags.channel) : undefined,
-                       configPath: flags.config });
+                       configPath: flags.config, logLevel: flags.log });
   try {
     await m.connect();
     const out = await match.run(m, args, flags);
