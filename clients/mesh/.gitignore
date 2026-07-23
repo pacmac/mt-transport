@@ -1,0 +1,4 @@
+node_modules/
+payloads/
+mtmesh.log
+config.local.yaml

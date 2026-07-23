@@ -1,0 +1,19 @@
+{
+  "name": "@pac/mesh",
+  "version": "0.0.1",
+  "description": "Mesh domain module: the single owner of mesh mechanics, our private protocol and timing. Consumers (node-dash, CLI, daemon, any dashboard) speak domain — nodes, detections, images, config, alerts — and know nothing of ports, frames, chunks, channels, airtime or queues.",
+  "type": "commonjs",
+  "main": "index.js",
+  "bin": { "mtmesh": "bin/mtmesh.js" },
+  "scripts": {
+    "start": "node bin/mtmesh.js",
+    "test": "node test/skeleton.js"
+  },
+  "dependencies": {
+    "ws": "^8.0.0",
+    "yaml": "^2.0.0"
+  },
+  "engines": { "node": ">=20.12.0", "pnpm": ">=9" },
+  "packageManager": "pnpm@9.15.9",
+  "license": "MIT"
+}

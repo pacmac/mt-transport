@@ -1,0 +1,32 @@
+# mtmesh config — the ONLY place vars/paths/timings live. Override order:
+# defaults(code) < this file < env(MTMESH_*) < CLI flags.
+gw:
+  host: localhost
+  port: 8000            # node-dash proxy fronts send + events
+  sendPort: 8000
+  eventsPath: /events
+channel: 2             # never 0 (PRIMARY)
+paths:
+  store: ./payloads
+  log:   ./mtmesh.log
+timing:
+  sendSpacingMs: 3000
+  replyTimeoutMs: 20000
+  wsMaxPayload: 0        # gateway opens with a multi-MB snapshot
+  chunkAnswerMs: 8000
+  idleMs: 240000
+  pushDeadlineMs: 900000
+retry:
+  commands: false        # non-idempotent; no blind retry
+listen:
+  autoFetchImages: true
+  alerts: [motion, fault]
+notify:
+  transports:
+    console:  { enabled: true }
+    email:    { enabled: false, to: "" }
+    webhook:  { enabled: false, url: "" }
+    whatsapp: { enabled: false }
+  routes:
+    motion: [console]
+    fault:  [console]
