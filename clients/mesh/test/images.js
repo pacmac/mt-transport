@@ -28,7 +28,7 @@ const chunkBytes = (s) => payload.subarray(s * CH, Math.min((s + 1) * CH, payloa
 
 // ---- 1. PushReceiver reassembly + CRC (direct) ------------------------------
 {
-  const rx = new PushReceiver(1, { idleMs: 100, actMs: 100 });
+  const rx = new PushReceiver(1, { idleMs: 100, actMs: 100, quietMs: 100 });
   rx.onFrame(P.encodeManifest(1, 2, payload.length, COUNT, CRC), 1000);
   for (let s = 0; s < COUNT; s++) rx.onFrame(P.encodeChunk(1, s, chunkBytes(s)), 1000);
   ok(rx.missing().length === 0, 'reassembly: nothing missing');
@@ -38,7 +38,7 @@ const chunkBytes = (s) => payload.subarray(s * CH, Math.min((s + 1) * CH, payloa
 // ---- 2. repair round (direct, explicit clock) -------------------------------
 {
   const k = 2;
-  const rx = new PushReceiver(1, { idleMs: 100, actMs: 100 });
+  const rx = new PushReceiver(1, { idleMs: 100, actMs: 100, quietMs: 100 });
   rx.onFrame(P.encodeManifest(1, 2, payload.length, COUNT, CRC), 1000);
   for (let s = 0; s < COUNT; s++) if (s !== k) rx.onFrame(P.encodeChunk(1, s, chunkBytes(s)), 1000);
 
@@ -106,7 +106,7 @@ function makeDevice(ref, { drop = new Set(), repairOnly = false, from = '!8cee33
 function makeImages(dev, tmp) {
   return new Images({
     gw: dev.gw, gwId: '!gw', channel: 2, protocol: P, timing: {}, model: null,
-    cfg: { paths: { store: tmp }, timing: { pushIdleMs: 15, pushActMs: 15, pushPollMs: 5, pushDeadlineMs: 6000 } },
+    cfg: { paths: { store: tmp }, timing: { pushIdleMs: 15, pushActMs: 15, pushQuietMs: 15, pushPollMs: 5, pushDeadlineMs: 6000 } },
     log: { debug() {}, info() {}, warn() {} },
     command: dev.command,
   });

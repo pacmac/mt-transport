@@ -13,7 +13,8 @@ const DEFAULTS = Object.freeze({
   logLevel: 'info', // silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides. See lib/log.js.
   paths:   { store: './payloads', log: './mtmesh.log' },
   timing:  { sendSpacingMs: 3000, replyTimeoutMs: 20000, wsMaxPayload: 0,
-             chunkAnswerMs: 8000, idleMs: 240000, pushDeadlineMs: 900000 },
+             chunkAnswerMs: 8000, idleMs: 240000, pushDeadlineMs: 900000,
+             pushQuietMs: 15000 }, // post-stream quiet wait before PROGRESS_Q; must exceed device max inter-chunk gap (~9s)
   retry:   { commands: false },
   listen:  { autoFetchImages: true, alerts: ['motion', 'fault'] },
   daemon:  { serve: false, host: '127.0.0.1', port: 8787 }, // opt-in read-only domain HTTP+WS surface

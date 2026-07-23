@@ -67,7 +67,7 @@ class Images {
     if (existing) return existing;
     const T = this.cfg.timing || {};
     const idleMs = T.pushIdleMs != null ? T.pushIdleMs : 35000; // proven push idle
-    const entry = { rx: new PushReceiver(pid, { idleMs, actMs: T.pushActMs }), node, aborted: false };
+    const entry = { rx: new PushReceiver(pid, { idleMs, actMs: T.pushActMs, quietMs: T.pushQuietMs }), node, aborted: false };
     this.active.set(pid, entry);
     entry.promise = this._drive(entry, opts).finally(() => this.active.delete(pid));
     return entry;

@@ -18,6 +18,7 @@ timing:
   chunkAnswerMs: 8000
   idleMs: 240000
   pushDeadlineMs: 900000
+  pushQuietMs: 15000     # post-stream quiet wait before PROGRESS_Q; must exceed the device's max inter-chunk gap (~9s). actMs(4s) < quietMs(15s) < push idle(35s)
 retry:
   commands: false        # non-idempotent; no blind retry
 listen:

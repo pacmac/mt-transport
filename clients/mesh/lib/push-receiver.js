@@ -42,11 +42,16 @@ class PushReceiver {
    *                      taking ~4 min to notice a genuinely dead one.
    */
   constructor(pid, { idleMs = 8000, maxStale = 8, maxUnanswered = 30,
-                     actMs = 4000 } = {}) {
+                     actMs = 4000, quietMs = 15000 } = {}) {
     // actMs: spacing once the DEVICE has told us where it is. The long idleMs is
     // for detecting silence we cannot otherwise explain; it must not also gate
     // the actions we take after the answer arrives.
+    // quietMs: the wait once we HAVE a manifest and the stream has fallen quiet
+    // but the device has not yet said "done". Invariant actMs < quietMs < idleMs.
+    // Must stay comfortably above the device's max inter-chunk gap (measured 9s)
+    // or we query mid-stream — wasted airtime only, never a premature REPAIR.
     this.actMs = actMs;
+    this.quietMs = quietMs;
     this.maxUnanswered = maxUnanswered;
     this.unanswered = 0;
     this.pid = pid;
@@ -146,11 +151,17 @@ class PushReceiver {
   tick(nowMs) {
     if (this.state === ST.DONE || this.failed) return null;
 
-    // Not idle yet — the device is streaming. Do nothing. BUT once it has SAID it
-    // finished its pass (or we already hold everything), the long timer must not
-    // apply — that once cost 3 x 35 s of dead time on a transfer missing ONE chunk.
+    // Not idle yet — the device is streaming. Do nothing. Three-way gate:
+    //   known (device said done / we hold all) -> actMs  : act at once — that once
+    //         cost 3 x 35 s of dead time on a transfer missing ONE chunk.
+    //   have manifest, stream quiet, not done  -> quietMs: query soon. The device
+    //         streams every few s (measured max gap 9s); the old 35s here was dead
+    //         airtime — a clean run wasted 2 x 35 s on a transfer missing 2 of 32.
+    //   no manifest yet (awaiting START/stream)-> idleMs : stay patient. A short
+    //         wait resends START before the device's ~20s prepare and can restart
+    //         its stream. The startup wait and the quiet wait are NOT the same.
     const known = this.manifest && (this.progressDone || this.missing().length === 0);
-    const gate = known ? this.actMs : this.idleMs;
+    const gate = known ? this.actMs : (this.manifest ? this.quietMs : this.idleMs);
     if (nowMs - this.lastRxMs < gate) return null;
     if (nowMs - this.lastTxMs < gate) return null;
 
