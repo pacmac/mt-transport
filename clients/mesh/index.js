@@ -12,6 +12,7 @@ const errors = require('./lib/errors');
 const { ni, MeshError } = errors;
 const settings = require('./lib/settings');
 const protocol = require('./lib/protocol');
+const { resolveTarget } = require('./lib/resolve');
 const { Gateway } = require('./lib/gw');
 const { Timing } = require('./lib/timing');
 const { Model } = require('./lib/model');
@@ -39,6 +40,7 @@ class Mesh extends EventEmitter {
     this.notifier = null;
     this.gwId = null;
     this.channel = null;
+    this._roster = [];        // cached gateway node list ({id,num,name}) for target->num
   }
 
   // ---- lifecycle ----
@@ -56,11 +58,13 @@ class Mesh extends EventEmitter {
       timing: this.timing, model: this.model, cfg: this.cfg,
       log: require('./lib/log').log.child('images'),
       command: (node, verb, args) => this.command(node, verb, args),
+      send: (node, text) => this._sendRaw(node, text),   // fire-and-forget control via the DM path
     });
     this.images.emit = (type, payload) => this.emit(type, payload);
     this.gw.onEvent((ev) => this._onEvent(ev));
     log.debug('connecting to gw %s (gwId %s, channel %d)', this.cfg.gw.host, this.gwId, this.channel);
     await this.gw.connect();
+    await this._refreshRoster();   // seed target->num; refreshed lazily on a resolver miss
     return this;
   }
 
@@ -115,13 +119,49 @@ class Mesh extends EventEmitter {
     });
   }
 
+  // ---- addressing: target -> num, DM-default send, private fallback ----
+  async _refreshRoster() {
+    try { this._roster = await this.nodes(); }
+    catch (e) { log.debug('roster refresh failed: %s', e && e.message); }
+    return this._roster;
+  }
+
+  // Resolve a target to { num, atToken }. On a name/suffix miss, refetch the roster
+  // once (it may be stale) then accept whatever we get — a null num means broadcast.
+  async _resolve(node) {
+    let r = resolveTarget(node, this._roster);
+    if (r.num == null && r.atToken !== '*') { await this._refreshRoster(); r = resolveTarget(node, this._roster); }
+    return r;
+  }
+
+  // Decide DM vs fallback + build the addressing prefix. Returns { text, opts, key }.
+  _addressed(node, body, num, atToken) {
+    const dm = this.cfg.dm || {};
+    const directed = dm.default !== false && num != null;   // DM only when we have a num
+    const addr = (directed && dm.omitAddress) ? '' : `@${atToken} `;  // @ stays until fleet-flashed
+    const text = `${addr}${body}`;
+    const opts = directed
+      ? { to: num, channel: 0 }                                       // directed PKC DM
+      : { channel: dm.fallbackChannel != null ? dm.fallbackChannel : this.channel }; // private broadcast
+    return { text, opts, key: `${num != null ? num : atToken}|${text}` };
+  }
+
+  // Fire-and-forget send over the DM path (control frames; no reply awaited).
+  async _sendRaw(node, body) {
+    const { num, atToken } = await this._resolve(node);
+    const { text, opts } = this._addressed(node, body, num, atToken);
+    return this.gw.sendText(this.gwId, text, opts);
+  }
+
   // ---- commands (module owns grammar + timing + correlation) ----
   async command(node, verb, args = []) {
     const a = Array.isArray(args) ? args : (args === '' || args == null ? [] : [args]);
-    const text = protocol.buildCommand(node, verb, a);
+    const { num, atToken } = await this._resolve(node);
+    const body = `${verb}${a.length ? ' ' + a.join(' ') : ''}`;
+    const { text, opts, key } = this._addressed(node, body, num, atToken);
     return this.timing.enqueue(
-      () => this.gw.sendText(this.gwId, text, { channel: this.channel }),
-      { match: (r) => r && typeof r === 'object', dedupKey: `${node}|${verb}|${text}` });
+      () => this.gw.sendText(this.gwId, text, opts),
+      { match: (r) => r && typeof r === 'object', dedupKey: `${key}|${verb}` });
   }
   async ping(node) { return this.command(node, 'ping'); }
   async status(node, domain) { return this.command(node, 'status', domain ? [domain] : []); }

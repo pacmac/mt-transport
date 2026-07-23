@@ -30,7 +30,7 @@ const VERBS = [
 function usage() {
   const lines = VERBS.map(v => `  mtmesh ${v.verb} ${v.args}`.padEnd(46) + v.help);
   return [
-    'mtmesh [--gw URL] [--channel N] [--config FILE] [--json] <verb> [args]',
+    'mtmesh [--gw URL] [--config FILE] [--json] <verb> [args]',
     '', 'verbs:', ...lines, '',
   ].join('\n');
 }
@@ -57,8 +57,7 @@ async function main() {
   const { flags, match, args } = parse(process.argv.slice(2));
   if (flags.help || !match) { console.log(usage()); process.exit(match ? 0 : 1); }
 
-  const m = new Mesh({ gw: flags.gw, channel: flags.channel != null ? Number(flags.channel) : undefined,
-                       configPath: flags.config, logLevel: flags.log,
+  const m = new Mesh({ gw: flags.gw, configPath: flags.config, logLevel: flags.log,
                        serve: flags.serve, servePort: flags.port != null ? Number(flags.port) : undefined });
   try {
     await m.connect();

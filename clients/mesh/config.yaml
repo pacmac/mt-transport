@@ -5,8 +5,12 @@ gw:
   port: 8000            # node-dash proxy fronts send + events
   sendPort: 8000
   eventsPath: /events
-  gatewayId: null       # REQUIRED for send — the BLE gateway node, e.g. "!2687afb1" (OMNI, channel 2)
-channel: 2             # never 0 (PRIMARY)
+  gatewayId: "!2687afb1"  # OMNI gateway (channel 2) — the BLE gateway node
+channel: 2             # PRIVATE FALLBACK channel (broadcast when a DM can't be addressed); never 0 (PRIMARY)
+dm:                     # directed PKC DM is the default send; private channel is the fallback
+  default: true         # true => command/control go as a directed DM (to:num) on channel 0 (PKC)
+  fallbackChannel: 2    # broadcast here when num is unknown / target is '*' / dm.default is false
+  omitAddress: false    # TEMP: keep the @<target> text prefix until the fleet is flashed, then flip true + remove
 logLevel: info         # silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides
 paths:
   store: ./payloads

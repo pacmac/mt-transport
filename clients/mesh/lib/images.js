@@ -18,7 +18,7 @@ const PT_IMAGE = 2;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class Images {
-  // deps: { gw, gwId, channel, protocol, timing, model, cfg, log, command }
+  // deps: { gw, gwId, channel, protocol, timing, model, cfg, log, command, send }
   constructor(deps) {
     this.gw = deps.gw;
     this.gwId = deps.gwId;
@@ -29,18 +29,11 @@ class Images {
     this.cfg = deps.cfg || {};
     this.log = deps.log || { debug() {}, info() {}, warn() {} };
     this.command = deps.command;                 // (node,verb,args) => reply
+    this.send = deps.send;                        // (node, text) => fire-and-forget over the DM path
     this.store = new PayloadStore({ dir: (this.cfg.paths && this.cfg.paths.store) || './payloads' });
     this.active = new Map();                      // pid -> { rx, node, aborted, promise }
     this.listening = false;
     this.emit = () => {};                          // installed by Mesh
-  }
-
-  // Address the device by the @<target> token the firmware matches (last-4 hex of
-  // the node id / num, or the short name if the caller gave one).
-  _target(node) {
-    let s = String(node).replace(/^@/, '').replace(/^!/, '');
-    if (/^\d+$/.test(s) && s.length > 4) s = (Number(s) >>> 0).toString(16);
-    return s.length > 4 ? s.slice(-4) : s;
   }
 
   // ---- the single port-261 entry point --------------------------------------
@@ -73,19 +66,20 @@ class Images {
     return entry;
   }
 
-  // Map a decoded control frame to its text command and fire it (best-effort:
-  // chunks are the reply, not text; a lost control frame costs one idle period).
-  _sendControl(target, buf) {
+  // Map a decoded control frame to its push sub-command and fire it over the DM path
+  // (best-effort: chunks are the reply, not text; a lost control frame costs one idle
+  // period). Addressing (@token / to:num / fallback) is owned by the injected send().
+  _sendControl(node, buf) {
     const f = this.protocol.decodeFrame(buf);
     if (!f) return;
     const M = this.protocol.MSG;
     let text;
-    if (f.type === M.START) text = `@${target} push ${f.pid}`;
-    else if (f.type === M.PROGRESS_Q) text = `@${target} push q ${f.pid}`;
-    else if (f.type === M.REPAIR) text = `@${target} push rep ${f.pid} ${f.ids.join(',')}`;
-    else if (f.type === M.COMPLETE) text = `@${target} push done ${f.pid} ${f.crc}`;
+    if (f.type === M.START) text = `push ${f.pid}`;
+    else if (f.type === M.PROGRESS_Q) text = `push q ${f.pid}`;
+    else if (f.type === M.REPAIR) text = `push rep ${f.pid} ${f.ids.join(',')}`;
+    else if (f.type === M.COMPLETE) text = `push done ${f.pid} ${f.crc}`;
     else return;
-    this.gw.sendText(this.gwId, text, { channel: this.channel })
+    this.send(node, text)
       .catch((e) => this.log.debug('control send failed: %s', e && e.message));
   }
 
@@ -110,7 +104,6 @@ class Images {
   async _drive(entry, { onProgress, signal } = {}) {
     const { rx, node } = entry;
     const pid = rx.pid;
-    const target = this._target(node);
     const T = this.cfg.timing || {};
     const pollMs = T.pushPollMs != null ? T.pushPollMs : 1000;
     const deadline = Date.now() + (T.pushDeadlineMs != null ? T.pushDeadlineMs : 900000);
@@ -144,7 +137,7 @@ class Images {
       }
     }
 
-    if (!adopt) this._sendControl(target, this.protocol.encodeStart(pid));
+    if (!adopt) this._sendControl(node, this.protocol.encodeStart(pid));
 
     let lastPersistCount = -1;
     while (Date.now() < deadline) {
@@ -154,7 +147,7 @@ class Images {
       await sleep(pollMs);
 
       const out = rx.tick(Date.now());
-      if (out) this._sendControl(target, out);
+      if (out) this._sendControl(node, out);
 
       if (rx.received !== lastPersistCount) { lastPersistCount = rx.received; this._persistPartial(node, rx); }
       if (onProgress) { try { onProgress({ received: rx.received, count: rx.count }); } catch { /* never break the transfer */ } }

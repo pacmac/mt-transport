@@ -62,11 +62,24 @@ const crc32 = (buf) => zlib.crc32(buf) >>> 0;
 // Addressing accepts the 4-hex node suffix, the short name, or "*". Short names
 // MUST NOT contain spaces — the device tokenises on the first space to split
 // target from verb, so a spaced target breaks addressing entirely.
+// Normalize a target to the @-grammar token the firmware matches: the 4-hex node-id
+// suffix, a short name, or "*". Strips a leading @/!; a numeric node-num or an 8-hex
+// mac is reduced to its last-4-hex suffix. Canonical home of images' former _target
+// (shared so the CLI, command() and the push control path address identically).
+function resolveAtToken(target) {
+  let s = String(target).replace(/^@/, '').replace(/^!/, '');
+  if (/^\d+$/.test(s) && s.length > 4) s = (Number(s) >>> 0).toString(16);
+  return s.length > 4 ? s.slice(-4) : s;
+}
+
 function buildCommand(target, verb, args = []) {
-  const t = String(target).replace(/^@/, '');
-  if (t !== '*' && /\s/.test(t)) {
+  // Guard the RAW target: a space breaks the firmware's "@<target> <verb>" split.
+  // Check before resolveAtToken (which would slice a spaced token to its last 4 chars).
+  const raw = String(target).replace(/^@/, '').replace(/^!/, '');
+  if (raw !== '*' && /\s/.test(raw)) {
     throw new MeshError(`invalid target ${JSON.stringify(target)}: contains whitespace`, 'EBADTARGET');
   }
+  const t = resolveAtToken(target);
   const tail = (args && args.length) ? ' ' + args.join(' ') : '';
   return `@${t} ${verb}${tail}`;
 }
@@ -235,7 +248,7 @@ module.exports = {
   REPAIR_HEADER_LEN, REPAIR_IDS_MAX, MANIFEST_REPEAT_EVERY, PROTO_VERSION,
   MSG, PT, UP,
   // grammar + 260
-  buildCommand, parseReply, parse260,
+  buildCommand, resolveAtToken, parseReply, parse260,
   // frame codec
   decodeFrame, encodeStart, encodeProgressQ, encodeRepair, encodeComplete,
   encodeManifest, encodeChunk, encodeProgress,

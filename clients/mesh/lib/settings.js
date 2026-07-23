@@ -16,6 +16,11 @@ const DEFAULTS = Object.freeze({
              chunkAnswerMs: 8000, idleMs: 240000, pushDeadlineMs: 900000,
              pushQuietMs: 15000 }, // post-stream quiet wait before PROGRESS_Q; must exceed device max inter-chunk gap (~9s)
   retry:   { commands: false },
+  // Directed PKC DM (to:num, channel 0) is the DEFAULT send; the private channel is the
+  // fallback (num unknown / '*' / DM disabled). omitAddress keeps the legacy @<target>
+  // text prefix (un-flashed firmware still requires it) — flip true, then remove, once
+  // the whole fleet accepts bare-verb DMs.
+  dm:      { default: true, fallbackChannel: 2, omitAddress: false },
   listen:  { autoFetchImages: true, alerts: ['motion', 'fault'] },
   daemon:  { serve: false, host: '127.0.0.1', port: 8787 }, // opt-in read-only domain HTTP+WS surface
   notify:  { transports: { console: { enabled: true } }, routes: {} },
@@ -89,6 +94,8 @@ function load(opts = {}) {
   if (env.MTMESH_LOG) cfg.logLevel = env.MTMESH_LOG;
   if (env.MTMESH_SERVE) cfg.daemon.serve = env.MTMESH_SERVE !== '0' && env.MTMESH_SERVE !== 'false';
   if (env.MTMESH_SERVE_PORT) cfg.daemon.port = Number(env.MTMESH_SERVE_PORT);
+  if (env.MTMESH_DM) cfg.dm.default = env.MTMESH_DM !== '0' && env.MTMESH_DM !== 'false';
+  if (env.MTMESH_DM_OMIT) cfg.dm.omitAddress = env.MTMESH_DM_OMIT !== '0' && env.MTMESH_DM_OMIT !== 'false';
 
   // opts overrides (CLI flags) — undefined ignored
   if (opts.gw !== undefined) applyGw(cfg, opts.gw);

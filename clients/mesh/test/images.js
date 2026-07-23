@@ -90,9 +90,10 @@ function makeDevice(ref, { drop = new Set(), repairOnly = false, from = '!8cee33
       sent: [],
       async sendText(gwId, text) {
         this.sent.push(text);
-        const after = text.split(' push ')[1];
-        if (!after) return { id: 1 };
-        const tok = after.trim().split(/\s+/);
+        // Control text may be bare ("push q 1") or legacy @-prefixed ("@grge push q 1").
+        const m = text.match(/(?:^|@\S+\s+)push\s+(.*)$/);
+        if (!m) return { id: 1 };
+        const tok = m[1].trim().split(/\s+/);
         if (/^\d+$/.test(tok[0])) { if (!repairOnly) streamAll(); }        // START
         else if (tok[0] === 'q') deliver(P.encodeProgress(pid, COUNT, true)); // PROGRESS_Q
         else if (tok[0] === 'rep') {                                        // REPAIR
@@ -109,6 +110,7 @@ function makeImages(dev, tmp) {
     cfg: { paths: { store: tmp }, timing: { pushIdleMs: 15, pushActMs: 15, pushQuietMs: 15, pushPollMs: 5, pushDeadlineMs: 6000 } },
     log: { debug() {}, info() {}, warn() {} },
     command: dev.command,
+    send: (node, text) => dev.gw.sendText('!gw', text),   // control path (was gw.sendText w/ @token)
   });
 }
 
