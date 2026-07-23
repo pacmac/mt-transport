@@ -22,6 +22,7 @@ const log = require('./lib/log').log.child('mesh');
 
 const VERSION = require('./package.json').version;
 const PORT_ALARM = 260; // JSON: debug, config, adverts
+const PORT_CHUNK = 261; // binary: chunk/push frames
 
 class Mesh extends EventEmitter {
   // opts merge into config (defaults < config.yaml < env < opts). channel!=0.
@@ -49,6 +50,13 @@ class Mesh extends EventEmitter {
     this.gw = new Gateway(this.cfg);
     this.timing = new Timing(this.cfg.timing);
     this.model = new Model();
+    this.images = new Images({
+      gw: this.gw, gwId: this.gwId, channel: this.channel, protocol,
+      timing: this.timing, model: this.model, cfg: this.cfg,
+      log: require('./lib/log').log.child('images'),
+      command: (node, verb, args) => this.command(node, verb, args),
+    });
+    this.images.emit = (type, payload) => this.emit(type, payload);
     this.gw.onEvent((ev) => this._onEvent(ev));
     log.debug('connecting to gw %s (gwId %s, channel %d)', this.cfg.gw.host, this.gwId, this.channel);
     await this.gw.connect();
@@ -68,6 +76,10 @@ class Mesh extends EventEmitter {
       const obj = protocol.parse260(ev.payload);
       this.model.apply({ from: ev.from, obj });
       this.emit('node', this.model.node(ev.from));
+      return;
+    }
+    if (ev.kind === 'app' && ev.portnum === PORT_CHUNK) {
+      this.images.onFrame(ev.payload, ev.from);
     }
   }
 
@@ -113,10 +125,10 @@ class Mesh extends EventEmitter {
   async ping(node) { return this.command(node, 'ping'); }
   async status(node, domain) { return this.command(node, 'status', domain ? [domain] : []); }
 
-  // ---- images (mesh-images phase) ----
-  async listImages(node) { return ni('Mesh.listImages'); }
-  async getImage(node, pid, opts) { return ni('Mesh.getImage'); }
-  startImageListener() { return ni('Mesh.startImageListener'); }
+  // ---- images (hides chunk/push/timing) ----
+  async listImages(node) { return this.images.list(node); }
+  async getImage(node, pid, opts) { return this.images.get(node, pid, opts); } // -> Buffer
+  startImageListener() { return this.images.startListener(); }  // autonomous push catch
 
   // ---- config (mesh-config phase) ----
   async getSchema(node) { return ni('Mesh.getSchema'); }

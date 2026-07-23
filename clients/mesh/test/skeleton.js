@@ -8,13 +8,13 @@ const mesh = require('..');
 assert(mesh.Mesh && mesh.connect && mesh.errors && mesh.VERSION, 'exports present');
 const m = new mesh.Mesh();
 
-// Wired in mesh-cli-live (phase 3). Assert present; do NOT invoke (I/O / network).
-const implemented = ['connect', 'close', 'nodes', 'node', 'command', 'ping', 'status'];
+// Wired (cli-live phase 3 + images phase 4). Assert present; do NOT invoke (I/O).
+const implemented = ['connect', 'close', 'nodes', 'node', 'command', 'ping', 'status',
+  'listImages', 'getImage', 'startImageListener'];
 for (const name of implemented) assert(typeof m[name] === 'function', `${name} exists`);
 
 // Still skeleton — must throw NotImplemented (sync throw or rejected promise).
-const pending = ['listImages', 'getImage', 'startImageListener',
-  'getSchema', 'getConfig', 'setConfig', 'startAlertListener'];
+const pending = ['getSchema', 'getConfig', 'setConfig', 'startAlertListener'];
 
 let ok = 0;
 async function check() {
