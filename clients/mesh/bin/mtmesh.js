@@ -28,7 +28,9 @@ const VERBS = [
   { verb: 'cmd',         target: true,  args: '<verb> [args...]', help: 'send ANY device command raw (escape hatch)',
     run: (m, t, a, flags) => {
       if (!a.length) throw new errors.MeshError('cmd: needs a device verb', 'EUSAGE');
-      return m.command(t, a[0], a.slice(1), flags['no-reply'] ? { noReply: true } : {});
+      const opts = m._cmdReliab(a[0]);        // idempotent-retry, except reboot/wedge
+      if (flags['no-reply']) opts.noReply = true;
+      return m.command(t, a[0], a.slice(1), opts);
     } },
   { verb: 'listen',      target: false, args: '[--serve] [--port N]', help: 'run as a daemon: hold model + autonomous image listener + event feed',
     daemon: true },

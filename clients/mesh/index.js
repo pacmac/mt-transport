@@ -30,6 +30,11 @@ const PORT_CHUNK = 261; // binary: chunk/push frames
 // on send instead of waiting, else they always ETIMEOUT. Keyed by verb OR "verb subverb".
 const NO_REPLY = new Set(['debug', 'sch', 'cam grab', 'chunk pull', 'push pull']);
 
+// Non-idempotent verbs: repeating them causes real side effects (double reboot, extra
+// watchdog reset), so the `cmd` passthrough must NOT auto-retry these. Everything else is
+// safe to resend. Reachable only via the raw escape hatch.
+const DANGER = new Set(['reboot', 'wedge']);
+
 class Mesh extends EventEmitter {
   // opts merge into config (defaults < config.yaml < env < opts). channel!=0.
   constructor(opts = {}) {
@@ -167,6 +172,11 @@ class Mesh extends EventEmitter {
   // Reliability profile for KNOWN-idempotent commands: resend on timeout (safe to repeat).
   // The raw command() below defaults to retries=0 — the escape hatch for reboot/wedge.
   _idem() { const r = this.cfg.retry || {}; return { retries: r.idempotent != null ? r.idempotent : 0, timeoutMs: r.attemptTimeoutMs }; }
+
+  // Reliability profile for a RAW `cmd` passthrough: idempotent-retry unless the verb is
+  // side-effecting (reboot/wedge → one-shot). Keeps cmd hop/echo/status resilient on a
+  // marginal link without repeating a reboot.
+  _cmdReliab(verb) { return DANGER.has(verb) ? {} : this._idem(); }
 
   // ---- commands (module owns grammar + timing + correlation) ----
   // { retries, timeoutMs } destructured (NOT named `opts` — that is the send opts from _addressed).

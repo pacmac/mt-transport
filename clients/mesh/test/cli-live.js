@@ -152,6 +152,16 @@ async function main() {
     ok(r2 && r2.sent === true, 'noReply: "cam grab" auto-resolves');
   }
 
+  // cmd reliability: idempotent verbs retry, reboot/wedge stay one-shot
+  {
+    const { m } = wire();
+    m.cfg.retry = { idempotent: 2, attemptTimeoutMs: 10000 };
+    ok(m._cmdReliab('hop').retries === 2, 'cmd: idempotent verb (hop) gets retries');
+    ok(m._cmdReliab('echo').retries === 2, 'cmd: echo gets retries');
+    ok(!(m._cmdReliab('reboot').retries), 'cmd: reboot is one-shot (no retries)');
+    ok(!(m._cmdReliab('wedge').retries), 'cmd: wedge is one-shot (no retries)');
+  }
+
   console.log(`cli-live OK: ${pass} assertions passed`);
 }
 
