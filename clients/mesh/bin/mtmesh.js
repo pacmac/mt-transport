@@ -7,35 +7,42 @@
 'use strict';
 const { Mesh, errors } = require('..');
 
-// ---- verb table: {verb, args, help, run(ctx)} ; sub-verbs via space in `verb` ----
+// ---- verb table: {verb, target, args, help, run(m,target,args,flags)} ----------
+// Grammar is target-first: `mtmesh <target> <verb> [args]`. `target: true` verbs
+// receive the resolved target as the FIRST run() arg; `nodes`/`listen` are targetless.
 const VERBS = [
-  { verb: 'nodes',       args: '',                    help: 'list known nodes',
+  { verb: 'nodes',       target: false, args: '',              help: 'list known nodes',
     run: (m) => m.nodes() },
-  { verb: 'status',      args: '<target> [mem|alarm]', help: 'device status',
-    run: (m, a) => m.status(a[0], a[1] || '') },
-  { verb: 'ping',        args: '<target>',            help: 'ping a node',
-    run: (m, a) => m.ping(a[0]) },
-  { verb: 'image list',  args: '<target>',            help: 'list available images',
-    run: (m, a) => m.listImages(a[0]) },
-  { verb: 'image get',   args: '<target> <pid> [--out FILE]', help: 'fetch an image',
-    run: (m, a, o) => m.getImage(a[0], a[1], { out: o.out }) },
-  { verb: 'config get',  args: '<target>',            help: 'read device config',
-    run: (m, a) => m.getConfig(a[0]) },
-  { verb: 'config set',  args: '<target> <key> <value>', help: 'set device config (validated)',
-    run: (m, a) => m.setConfig(a[0], { [a[1]]: a[2] }) },
-  { verb: 'listen',      args: '[--serve] [--port N]', help: 'run as a daemon: hold model + autonomous image listener + event feed',
+  { verb: 'status',      target: true,  args: '[mem|alarm]',   help: 'device status',
+    run: (m, t, a) => m.status(t, a[0] || '') },
+  { verb: 'ping',        target: true,  args: '',              help: 'ping a node',
+    run: (m, t) => m.ping(t) },
+  { verb: 'image list',  target: true,  args: '',              help: 'list available images',
+    run: (m, t) => m.listImages(t) },
+  { verb: 'image get',   target: true,  args: '<pid> [--out FILE]', help: 'fetch an image',
+    run: (m, t, a, o) => m.getImage(t, a[0], { out: o.out }) },
+  { verb: 'config get',  target: true,  args: '',              help: 'read device config',
+    run: (m, t) => m.getConfig(t) },
+  { verb: 'config set',  target: true,  args: '<key> <value>', help: 'set device config (validated)',
+    run: (m, t, a) => m.setConfig(t, { [a[0]]: a[1] }) },
+  { verb: 'listen',      target: false, args: '[--serve] [--port N]', help: 'run as a daemon: hold model + autonomous image listener + event feed',
     daemon: true },
 ];
 
 function usage() {
-  const lines = VERBS.map(v => `  mtmesh ${v.verb} ${v.args}`.padEnd(46) + v.help);
+  const lines = VERBS.map(v => {
+    const form = v.target ? `<target> ${v.verb} ${v.args}` : `${v.verb} ${v.args}`;
+    return `  mtmesh ${form}`.padEnd(48) + v.help;
+  });
   return [
-    'mtmesh [--gw URL] [--config FILE] [--json] <verb> [args]',
+    'mtmesh [--gw URL] [--config FILE] [--json] <target> <verb> [args]',
     '', 'verbs:', ...lines, '',
   ].join('\n');
 }
 
-// ---- arg parse: global flags, then longest-matching verb, then positionals ----
+// ---- arg parse: global flags, then TARGET-FIRST verb dispatch ------------------
+// `mtmesh <target> <verb> [args]`. A targetless verb (nodes/listen) at the head wins;
+// otherwise the first positional IS the target and the verb follows it.
 function parse(argv) {
   const flags = {}; const rest = [];
   const BOOL = new Set(['json', 'serve', 'help']);
@@ -45,16 +52,24 @@ function parse(argv) {
     else if (a.startsWith('--')) flags[a.slice(2)] = argv[++i];
     else rest.push(a);
   }
-  // match the longest verb (e.g. "image get" before "image").
-  const joined = rest.join(' ');
-  const match = VERBS.filter(v => joined === v.verb || joined.startsWith(v.verb + ' '))
-                     .sort((x, y) => y.verb.length - x.verb.length)[0];
-  const args = match ? rest.slice(match.verb.split(' ').length) : rest;
-  return { flags, match, args };
+  const longest = (cands, tokens) => {
+    const j = tokens.join(' ');
+    return cands.filter(v => j === v.verb || j.startsWith(v.verb + ' '))
+                .sort((x, y) => y.verb.length - x.verb.length)[0];
+  };
+  // 1) targetless verb at the head (nodes / listen)
+  let match = longest(VERBS.filter(v => !v.target), rest);
+  if (match) return { flags, match, target: null, args: rest.slice(match.verb.split(' ').length) };
+  // 2) first positional is the target; the verb follows it
+  const target = rest[0];
+  const after = rest.slice(1);
+  match = longest(VERBS.filter(v => v.target), after);
+  const args = match ? after.slice(match.verb.split(' ').length) : after;
+  return { flags, match, target, args };
 }
 
 async function main() {
-  const { flags, match, args } = parse(process.argv.slice(2));
+  const { flags, match, target, args } = parse(process.argv.slice(2));
   if (flags.help || !match) { console.log(usage()); process.exit(match ? 0 : 1); }
 
   const m = new Mesh({ gw: flags.gw, configPath: flags.config, logLevel: flags.log,
@@ -62,7 +77,7 @@ async function main() {
   try {
     await m.connect();
     if (match.daemon) return await runDaemon(m, flags);
-    const out = await match.run(m, args, flags);
+    const out = await match.run(m, target, args, flags);
     console.log(flags.json ? JSON.stringify(out) : format(out));
     await m.close();
   } catch (e) {
