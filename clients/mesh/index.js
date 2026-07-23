@@ -78,15 +78,28 @@ class Mesh extends EventEmitter {
   async nodes() { return this._summaries(await this.gw.nodes(this.gwId)); }
   async node(id) { return (await this.nodes()).find((n) => n.id === id || n.num === id) || null; }
 
-  // mesh-gw /{gwId}/nodes shape is UNVERIFIED live (gw busy) — normalize defensively.
+  // Normalize the gateway node roster. VERIFIED live 2026-07-23 against
+  // :8001/{gwId}/nodes: { total, count, filter, nodes } where `nodes` is a DICT
+  // keyed by num-as-string (node_id absent; name in user.long_name/short_name).
+  // Accept a dict OR an array (defensive for other gateways/versions).
   _summaries(j) {
-    const list = Array.isArray(j) ? j : (j && Array.isArray(j.nodes) ? j.nodes : []);
-    return list.map((e) => ({
-      id: e.node_id || e.id || (e.num != null ? '!' + (e.num >>> 0).toString(16) : null),
-      num: e.num != null ? e.num : e.from_num,
-      name: e.long_name || (e.user && e.user.long_name) || e.short_name || null,
-      raw: e,
-    }));
+    const nodes = (j && j.nodes !== undefined) ? j.nodes : j;
+    let list;
+    if (Array.isArray(nodes)) list = nodes;
+    else if (nodes && typeof nodes === 'object') list = Object.values(nodes);
+    else list = [];
+    return list.map((e) => {
+      const u = e.user || {};
+      const num = e.num != null ? e.num : e.from_num;
+      return {
+        id: e.node_id || e.id || (num != null ? '!' + (num >>> 0).toString(16) : null),
+        num,
+        name: u.long_name || u.short_name || e.long_name || e.short_name || null,
+        lastHeard: e.last_heard != null ? e.last_heard : null,
+        hops: e.hops != null ? e.hops : null,
+        raw: e,
+      };
+    });
   }
 
   // ---- commands (module owns grammar + timing + correlation) ----

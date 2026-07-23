@@ -91,14 +91,25 @@ async function main() {
     ok(r1.ok === 1 && r2.ok === 1, 'dedup: both callers receive the reply');
   }
 
-  // _summaries normalizes defensively
+  // _summaries against the VERIFIED live shape: {nodes:{<num>:{num,user,...}}}
   {
     const { m } = wire();
-    const s = m._summaries([{ node_id: '!aa', num: 170, long_name: 'Alpha' }, { num: 171, short_name: 'B' }]);
-    ok(s[0].id === '!aa' && s[0].name === 'Alpha', 'summary maps node_id/long_name');
-    ok(s[1].id === '!ab' && s[1].name === 'B', 'summary derives id from num + short_name');
-    ok(m._summaries({ nodes: [{ id: '!c' }] })[0].id === '!c', 'accepts {nodes:[...]}');
-    ok(m._summaries(null).length === 0, 'null -> []');
+    const live = { total: 1, count: 1, nodes: {
+      '2364420971': { num: 2364420971, hops: 1, last_heard: 100,
+        user: { long_name: 'Alarm Unit 336b 2-260723-23', short_name: 'U33B' } },
+    } };
+    const s = m._summaries(live);
+    ok(s.length === 1, 'dict container -> one summary');
+    ok(s[0].id === '!8cee336b', 'id derived from num (2364420971 -> !8cee336b)');
+    ok(s[0].name === 'Alarm Unit 336b 2-260723-23' && s[0].num === 2364420971, 'name from user.long_name');
+    ok(s[0].hops === 1 && s[0].lastHeard === 100, 'hops + lastHeard passed through');
+
+    // back-compat: plain array and {nodes:[...]}; short_name fallback; null -> []
+    const a = m._summaries([{ node_id: '!aa', long_name: 'Alpha' }, { num: 171, user: { short_name: 'B' } }]);
+    ok(a[0].id === '!aa' && a[0].name === 'Alpha', 'array + top-level long_name');
+    ok(a[1].id === '!ab' && a[1].name === 'B', 'id from num + user.short_name');
+    ok(m._summaries({ nodes: [{ id: '!c' }] })[0].id === '!c', 'accepts {nodes:[array]}');
+    ok(m._summaries(null).length === 0 && m._summaries({}).length === 0, 'null/{} -> []');
   }
 
   // connect() refuses without a gatewayId (no network reached)
