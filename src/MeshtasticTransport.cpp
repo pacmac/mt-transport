@@ -77,6 +77,8 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
     radio.setDio1Action(_onDio1Rx);
     if (radio.startReceive() == RADIOLIB_ERR_NONE)
         _rxActive = true;
+    _freqMHz = region.freqMHz;     // for the periodic calibrateImage()
+    _lastAgcResetMs = millis();    // start the AGC-reset clock at boot
     return true;
 }
 
@@ -579,10 +581,40 @@ void MeshtasticTransport::handleRxDone()
 // tells us something happened; getIrqFlags tells us WHAT), then advances the TX
 // state machine. RX-done → decode+queue; TX-done → drop the sent frame + next;
 // CAD-done → free: send, busy: listen + reschedule. Called every loop() pass.
+// Fire the periodic AGC reset ONLY when the radio is idle (never mid-TX or with a frame
+// queued — a standby then would corrupt the transmit). On a busy unit the reset simply
+// waits for the next idle gap; the always-awake node has gaps every heartbeat.
+void MeshtasticTransport::maybeResetAGC()
+{
+    if (busy()) return;                                              // TX in flight or queued
+    if ((uint32_t)(millis() - _lastAgcResetMs) < AGC_RESET_INTERVAL_MS) return;
+    resetAGC();
+}
+
+// The SX1262 loses RX boost ~60s after boot; only CALIBRATE_ALL resets the AGC (a plain
+// standby->startReceive does not — upstream SX126xInterface.cpp:451-514). Briefly (~ms)
+// leaves RX to calibrate: a frame arriving in that window is lost, accepted every 60s as
+// the cost of never going permanently deaf. calibrate() CLEARS image cal + DIO cfg, so
+// re-apply calibrateImage / DIO2 RF switch / boosted gain / DIO1 action, then re-arm RX.
+void MeshtasticTransport::resetAGC()
+{
+    _radio->standby(RADIOLIB_SX126X_STANDBY_RC, true);
+    _radio->calibrate(RADIOLIB_SX126X_CALIBRATE_ALL);
+    _radio->calibrateImage(_freqMHz);
+    _radio->setDio2AsRfSwitch(true);
+    _radio->setRxBoostedGainMode(true);
+    _radio->setDio1Action(_onDio1Rx);
+    _rxActive = (_radio->startReceive() == RADIOLIB_ERR_NONE);
+    _agcResets++;
+    _lastAgcResetMs = millis();
+}
+
 void MeshtasticTransport::service()
 {
     if (!_radio)
         return;
+
+    maybeResetAGC();   // periodic AGC reset (only when idle; see resetAGC)
 
     if (_radioEvent) {
         _radioEvent = false;
