@@ -157,6 +157,10 @@ bool MeshtasticTransport::buildAndQueue(uint32_t portnum, const uint8_t *payload
     memcpy(data.payload.bytes, payload, len);
     data.request_id = requestId;
     data.reply_id = replyId;
+    // One-shot want_response (see wantResponseNext). Cleared unconditionally so a
+    // failed send cannot leak the flag onto an unrelated later frame.
+    data.want_response = _wantRespNext;
+    _wantRespNext = false;
 
     static uint8_t plain[MAX_PAYLOAD];
     pb_ostream_t os = pb_ostream_from_buffer(plain, sizeof(plain));

@@ -219,8 +219,10 @@ Added during Phase 4 static check (first `-fstack-usage` pass left `handleComman
     (`usb-RAKwireless_WisCore_RAK4631_Board_<serial>`), but after the 1200 bps touch the
     bootloader enumerates as `usb-RAKWireless_WisBlock_RAK4631_<serial>` — the pinned
     path vanishes mid-cycle and pio's port-wait times out on every normal reflash.
-    Fix: glob pinned to the SERIAL (matches both modes, still can never match the
-    TimerCam): `upload_port = /dev/serial/by-id/*RAK4631*B8CBA9794FF6FA1E*`
+    Fix (corrected 2026-07-22 ~23:5x UTC after the by-id glob ALSO failed — pio
+    matches upload_port wildcards against its detected-ports list, which contains
+    real device nodes, never by-id symlinks): `upload_port = /dev/ttyACM*` —
+    survives both boot modes and renumbering; cannot match the TimerCam (ttyUSB0).
 
 Post-fix worst chain: 368 + ~130 + ~430 + 215 + 2048 ≈ **3.2 KB** (margin ~0.9 KB);
 RX-decrypt chain ≈ **2.8 KB** (margin ~1.3 KB).

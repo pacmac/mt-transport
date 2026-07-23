@@ -188,6 +188,11 @@ public:
     uint32_t getTxDelayMsec();
     void     scheduleNextTxIn(uint32_t ms) { _nextTxDelay = ms; _nextTxDelaySet = true; }
 
+    // One-shot: the NEXT enqueued frame carries Data.want_response = true. Used by
+    // the key-request bootstrap (directed NodeInfo asking the peer to answer with
+    // its User/public key). Mirrors the scheduleNextTxIn one-shot pattern.
+    void wantResponseNext() { _wantRespNext = true; }
+
     // TEST/DIAGNOSTIC hop override. When 1..7, send() forces EVERY frame's hop_limit
     // to this value regardless of the per-call argument; 0 = off (use the per-call
     // value). RAM-only — NOT persisted — so a reboot clears it; a forced hop must
@@ -285,6 +290,7 @@ private:
     uint32_t _slotTimeMsec = 30;      // recomputed in begin() from SF/BW
     uint32_t _nextTxDelay = 0;        // one-shot scheduled-delay override…
     bool     _nextTxDelaySet = false; // …consumed by the next enqueueFrame()
+    bool     _wantRespNext = false;   // one-shot Data.want_response (wantResponseNext)
     uint8_t  _hopOverride = 0;        // 0=off; 1..7 forces every frame's hop (test, RAM-only)
     uint8_t _frame[FRAME_CAP];    // introspection: the most recently built frame
     size_t  _frameLen = 0;
