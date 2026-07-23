@@ -33,9 +33,22 @@ try {
   ok(c.channel === 9, 'opts override env');
   delete process.env.MTMESH_CHANNEL;
 
-  // opts.gw host:port split
+  // opts.gw host:port moves BOTH port and sendPort (else send/events split)
   c = settings.load({ configPath: cfgPath, gw: '1.2.3.4:9001' });
-  ok(c.gw.host === '1.2.3.4' && c.gw.port === 9001, 'opts.gw host:port split');
+  ok(c.gw.host === '1.2.3.4' && c.gw.port === 9001 && c.gw.sendPort === 9001,
+    'opts.gw host:port sets host+port+sendPort');
+
+  // host-only override leaves ports untouched (from DEFAULTS: 8000/8000)
+  c = settings.load({ configPath: cfgPath, gw: 'onlyhost' });
+  ok(c.gw.host === 'onlyhost' && c.gw.port === 8000 && c.gw.sendPort === 8000,
+    'host-only override leaves ports as-is');
+
+  // env MTMESH_GW host:port also moves both ports
+  process.env.MTMESH_GW = 'envhost:7000';
+  c = settings.load({ configPath: cfgPath });
+  ok(c.gw.host === 'envhost' && c.gw.port === 7000 && c.gw.sendPort === 7000,
+    'env MTMESH_GW host:port sets both ports');
+  delete process.env.MTMESH_GW;
 
   // undefined opts don't clobber
   c = settings.load({ configPath: cfgPath, gatewayId: undefined });

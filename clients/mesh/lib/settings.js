@@ -41,6 +41,17 @@ function splitHost(s) {
   return Number.isFinite(port) ? { host: str.slice(0, i), port } : { host: str };
 }
 
+// Apply a host[:port] gateway override. A single --gw/MTMESH_GW points the WHOLE
+// gateway (send AND events) at that port, so a parsed port sets both gw.port and
+// gw.sendPort — otherwise events and sends split across ports (found live: WS on
+// :8001 but POST on :8000 → every reply timed out). Host-only leaves ports as-is;
+// split ports stay expressible via explicit gw.port/gw.sendPort in config.yaml.
+function applyGw(cfg, val) {
+  const { host, port } = splitHost(val);
+  cfg.gw.host = host;
+  if (port !== undefined) { cfg.gw.port = port; cfg.gw.sendPort = port; }
+}
+
 // Locate config.yaml: --config / env MTMESH_CONFIG / cwd / shipped module default.
 // First existing wins; returns null if none exist.
 function find(opts = {}) {
@@ -70,13 +81,13 @@ function load(opts = {}) {
 
   // env overrides (small, documented set)
   const env = process.env;
-  if (env.MTMESH_GW) deepMerge(cfg.gw, splitHost(env.MTMESH_GW));
+  if (env.MTMESH_GW) applyGw(cfg, env.MTMESH_GW);
   if (env.MTMESH_GATEWAY_ID) cfg.gw.gatewayId = env.MTMESH_GATEWAY_ID;
   if (env.MTMESH_CHANNEL) cfg.channel = Number(env.MTMESH_CHANNEL);
   if (env.MTMESH_LOG) cfg.logLevel = env.MTMESH_LOG;
 
   // opts overrides (CLI flags) — undefined ignored
-  if (opts.gw !== undefined) deepMerge(cfg.gw, splitHost(opts.gw));
+  if (opts.gw !== undefined) applyGw(cfg, opts.gw);
   if (opts.gatewayId !== undefined) cfg.gw.gatewayId = opts.gatewayId;
   if (opts.channel !== undefined && opts.channel !== null) cfg.channel = Number(opts.channel);
   if (opts.logLevel !== undefined) cfg.logLevel = opts.logLevel;
