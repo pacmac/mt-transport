@@ -61,6 +61,12 @@ class Mesh extends EventEmitter {
       send: (node, text) => this._sendRaw(node, text),   // fire-and-forget control via the DM path
     });
     this.images.emit = (type, payload) => this.emit(type, payload);
+    this.config = new Config({
+      command: (node, verb, args) => this.command(node, verb, args),
+      send: (node, text) => this._sendRaw(node, text),      // `sch` pages: fire-and-forget over the DM path
+      log: require('./lib/log').log.child('config'),
+      schemaTimeoutMs: this.cfg.timing && this.cfg.timing.chunkAnswerMs,
+    });
     this.gw.onEvent((ev) => this._onEvent(ev));
     log.debug('connecting to gw %s (gwId %s, channel %d)', this.cfg.gw.host, this.gwId, this.channel);
     await this.gw.connect();
@@ -79,6 +85,7 @@ class Mesh extends EventEmitter {
     }
     if (ev.kind === 'app' && ev.portnum === PORT_ALARM) {
       const obj = protocol.parse260(ev.payload);
+      if (obj && obj.t === 'sch') { this.config.onSchemaFrame(ev.from, obj); return; } // schema page, not model state
       this.model.apply({ from: ev.from, obj });
       this.emit('node', this.model.node(ev.from));
       return;
@@ -183,9 +190,9 @@ class Mesh extends EventEmitter {
   }
 
   // ---- config (mesh-config phase) ----
-  async getSchema(node) { return ni('Mesh.getSchema'); }
-  async getConfig(node) { return ni('Mesh.getConfig'); }
-  async setConfig(node, patch) { return ni('Mesh.setConfig'); }
+  async getSchema(node) { return this.config.schema(node); }        // device field table (cached)
+  async getConfig(node) { return this.config.get(node); }           // { values, unread }
+  async setConfig(node, patch) { return this.config.set(node, patch); } // schema-validated, then confirmed
 
   // ---- alerts (notify phase) ----
   startAlertListener() { return ni('Mesh.startAlertListener'); }

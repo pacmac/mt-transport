@@ -1,13 +1,14 @@
 ---
 task: mesh-config
-status: SPEC — slice 3 of the addressing/config rework; BLOCKED on mesh-dm (target resolver→num, DM-default send, channel-from-config all land there). This slice fills the config.js/index.js stubs so a caller passes (device, field, value), validated, never a raw device command. Rides on whatever addressing mesh-dm provides.
-source_hash: ~
+status: IMPLEMENTED + VERIFIED 2026-07-23. Offline: config 19 assertions + full regression green (skeleton now 13 impl / 1 pending). LIVE b80f: `config get` returns real values {chunk.gap 3000, hop 1, beat 60, …} + honest unread; `config set chunk.gap 3000` (no-op, restore-safe) → {set:{chunk.gap:3000},confirmed:true} via DM read/write/read-back. Rode on mesh-dm addressing (target-first CLI). IMPLEMENTATION DIVERGES from the draft below — see "Implementation notes".
+source_hash: clients/mesh/lib/config.js 94279d9f524f1008f53af6ae0ad568ed647eefdfb7e174980817dc9bb25036ae; clients/mesh/index.js 2564df86a101db45ab8362f82b881a4176cb1c74520672aebff53a17d5e7f586; clients/mesh/test/config.js 1eb9036bbe312e60e67360a605b5c51f4cf0445f6241c525b65d3ba120b83323; clients/mesh/test/skeleton.js 1afbf19720dd8eefa2921056323bc14ba4823e01174f9c2799914cb174886a02
 project: mt-transport
 scope:
   - specs/mesh-config.md
   - clients/mesh/lib/config.js      # fill schema()/get()/set() bodies (were ni() stubs)
   - clients/mesh/index.js           # getSchema/getConfig/setConfig delegate to Config; construct Config; route t:'sch' 260-frames in _onEvent
   - clients/mesh/test/config.js     # NEW — offline tests (device simulator: sch pages, config/chunk cfg replies, set+readback, validation)
+  - clients/mesh/test/skeleton.js   # AMENDED — getSchema/getConfig/setConfig move pending→implemented (startAlertListener stays pending)
 # NOT changing (moved to the mesh-dm slice):
 #   lib/protocol.js resolveTarget + lib/images.js _target (target→num resolver) — mesh-dm.
 #   bin/mtmesh.js --channel removal + channel-from-config — mesh-dm. (bin already dispatches config get/set; no config edit.)
@@ -15,6 +16,26 @@ scope:
 ---
 
 # mesh-config (phase 5) — device-schema-backed config get/set
+
+## Implementation notes (as-built — supersede the draft where they differ)
+- **Transport injected as `{ command, send }`** (not sendText/buildCommand/timing): `send`
+  is the DM-aware fire-and-forget from mesh-dm; `command` is the text-reply path. config.js
+  owns no addressing.
+- **`sch` reply routing by PAGE, not `from`.** LIVE finding: the `sch` reply is a BROADCAST
+  and arrives with `from` = a relaying gateway (`!2687afb1`/`!fa39f7b4`), never the target's
+  id. The schema is firmware-global (identical across units), so `onSchemaFrame` routes each
+  page to the in-flight pull by page number; duplicate frames from other relays are ignored.
+- **Per-page resend.** `_pullPage` re-sends `sch <p>` every ~2.5 s until it arrives or the
+  budget (chunkAnswerMs) runs out — a single lost broadcast must not kill the pull.
+- **`set()` does NOT force a schema pull for a KNOWN field.** It prefers an already-cached
+  device schema, then a built-in bound (`FALLBACK_FIELDS`, mirrors CONFIG_FIELDS) for the
+  mapped fields (chunk.gap/hop), and only pulls the schema for a field unknown to both. The
+  `sch` pull is air-heavy and unreliable on a congested/marginal mesh (verified: it failed
+  mid-pull while the 41910 field campaign was contending), so a mapped set (the gap-sweep)
+  must not depend on it. `getSchema()` still does the full pull (best-effort, retried).
+- `chunk.gap` is also device-validated (applySet clamps 0..60000), so a mapped set is
+  double-checked; the built-in bound is only a reachability fallback, not the source of truth.
+
 
 ## Goal (Peter)
 The CLI must isolate the caller from raw device commands: `mtmesh config set b80f
