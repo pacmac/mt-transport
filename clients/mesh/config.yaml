@@ -23,6 +23,10 @@ retry:
 listen:
   autoFetchImages: true
   alerts: [motion, fault]
+daemon:
+  serve: false          # opt-in read-only domain HTTP+WS surface (mtmesh listen --serve)
+  host: 127.0.0.1       # loopback only by default
+  port: 8787            # GET /health /nodes /nodes/:id ; WS /events (domain feed)
 notify:
   transports:
     console:  { enabled: true }

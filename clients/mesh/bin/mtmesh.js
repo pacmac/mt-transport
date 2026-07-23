@@ -23,8 +23,8 @@ const VERBS = [
     run: (m, a) => m.getConfig(a[0]) },
   { verb: 'config set',  args: '<target> <key> <value>', help: 'set device config (validated)',
     run: (m, a) => m.setConfig(a[0], { [a[1]]: a[2] }) },
-  { verb: 'listen',      args: '',                    help: 'daemon: model + image/alert listeners',
-    run: (m) => m.startImageListener() },
+  { verb: 'listen',      args: '[--serve] [--port N]', help: 'run as a daemon: hold model + autonomous image listener + event feed',
+    daemon: true },
 ];
 
 function usage() {
@@ -38,9 +38,10 @@ function usage() {
 // ---- arg parse: global flags, then longest-matching verb, then positionals ----
 function parse(argv) {
   const flags = {}; const rest = [];
+  const BOOL = new Set(['json', 'serve', 'help']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--json') flags.json = true;
+    if (a.startsWith('--') && BOOL.has(a.slice(2))) flags[a.slice(2)] = true;
     else if (a.startsWith('--')) flags[a.slice(2)] = argv[++i];
     else rest.push(a);
   }
@@ -57,9 +58,11 @@ async function main() {
   if (flags.help || !match) { console.log(usage()); process.exit(match ? 0 : 1); }
 
   const m = new Mesh({ gw: flags.gw, channel: flags.channel != null ? Number(flags.channel) : undefined,
-                       configPath: flags.config, logLevel: flags.log });
+                       configPath: flags.config, logLevel: flags.log,
+                       serve: flags.serve, servePort: flags.port != null ? Number(flags.port) : undefined });
   try {
     await m.connect();
+    if (match.daemon) return await runDaemon(m, flags);
     const out = await match.run(m, args, flags);
     console.log(flags.json ? JSON.stringify(out) : format(out));
     await m.close();
@@ -69,6 +72,23 @@ async function main() {
     else console.error(msg);
     process.exit(2);
   }
+}
+
+// Daemon path: hold the process open on the daemon's WS/server + image listener;
+// exit cleanly on the first SIGINT/SIGTERM. The event feed goes to stdout; this
+// startup notice + shutdown go to stderr so a --json feed stays pure.
+async function runDaemon(m, flags) {
+  const d = await m.listen({ json: flags.json });
+  const serving = m.cfg.daemon.serve ? ` — serving http://${m.cfg.daemon.host}:${d.address().port} (GET /health /nodes, WS /events)` : '';
+  console.error(`mtmesh listening${serving} — image listener ON — Ctrl-C to stop`);
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return; closing = true;
+    console.error('\nmtmesh stopping…');
+    try { d.stop(); await m.close(); } finally { process.exit(0); }
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 function format(out) {

@@ -18,6 +18,7 @@ const { Model } = require('./lib/model');
 const { Images } = require('./lib/images');
 const { Config } = require('./lib/config');
 const { Notifier } = require('./lib/notify');
+const { Daemon } = require('./lib/daemon');
 const log = require('./lib/log').log.child('mesh');
 
 const VERSION = require('./package.json').version;
@@ -130,6 +131,17 @@ class Mesh extends EventEmitter {
   async getImage(node, pid, opts) { return this.images.get(node, pid, opts); } // -> Buffer
   startImageListener() { return this.images.startListener(); }  // autonomous push catch
 
+  // ---- daemon (long-running: model + autonomous image listener + domain feed) ----
+  // Requires connect() first (cfg set). Returns the started Daemon.
+  listen(opts = {}) {
+    if (!this.cfg) throw new MeshError('listen() requires connect() first', 'ECONFIG');
+    this.daemon = new Daemon({
+      mesh: this, cfg: this.cfg, log: require('./lib/log').log.child('daemon'),
+      out: opts.out, json: opts.json,
+    });
+    return this.daemon.start();
+  }
+
   // ---- config (mesh-config phase) ----
   async getSchema(node) { return ni('Mesh.getSchema'); }
   async getConfig(node) { return ni('Mesh.getConfig'); }
@@ -142,4 +154,4 @@ class Mesh extends EventEmitter {
 // factory
 function connect(opts) { const m = new Mesh(opts); return m.connect().then(() => m); }
 
-module.exports = { Mesh, connect, errors, settings, VERSION };
+module.exports = { Mesh, connect, errors, settings, Daemon, VERSION };

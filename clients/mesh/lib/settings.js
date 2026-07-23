@@ -16,6 +16,7 @@ const DEFAULTS = Object.freeze({
              chunkAnswerMs: 8000, idleMs: 240000, pushDeadlineMs: 900000 },
   retry:   { commands: false },
   listen:  { autoFetchImages: true, alerts: ['motion', 'fault'] },
+  daemon:  { serve: false, host: '127.0.0.1', port: 8787 }, // opt-in read-only domain HTTP+WS surface
   notify:  { transports: { console: { enabled: true } }, routes: {} },
 });
 
@@ -85,12 +86,16 @@ function load(opts = {}) {
   if (env.MTMESH_GATEWAY_ID) cfg.gw.gatewayId = env.MTMESH_GATEWAY_ID;
   if (env.MTMESH_CHANNEL) cfg.channel = Number(env.MTMESH_CHANNEL);
   if (env.MTMESH_LOG) cfg.logLevel = env.MTMESH_LOG;
+  if (env.MTMESH_SERVE) cfg.daemon.serve = env.MTMESH_SERVE !== '0' && env.MTMESH_SERVE !== 'false';
+  if (env.MTMESH_SERVE_PORT) cfg.daemon.port = Number(env.MTMESH_SERVE_PORT);
 
   // opts overrides (CLI flags) — undefined ignored
   if (opts.gw !== undefined) applyGw(cfg, opts.gw);
   if (opts.gatewayId !== undefined) cfg.gw.gatewayId = opts.gatewayId;
   if (opts.channel !== undefined && opts.channel !== null) cfg.channel = Number(opts.channel);
   if (opts.logLevel !== undefined) cfg.logLevel = opts.logLevel;
+  if (opts.serve !== undefined) cfg.daemon.serve = !!opts.serve;
+  if (opts.servePort !== undefined && opts.servePort !== null) cfg.daemon.port = Number(opts.servePort);
 
   return cfg;
 }
