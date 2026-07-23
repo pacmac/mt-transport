@@ -1,7 +1,7 @@
 ---
 task: device-comms-doc
 status: reference (living doc — keep current)
-updated: 2026-07-20
+updated: 2026-07-23 (serial ROLE ALIASES + SSOT; camera RAK-powered; debug tap)
 scope:
   - specs/device-comms.md
 ---
@@ -149,15 +149,33 @@ const jpg    = await c.fetch('336b', pid);           // pull a chunked image (re
 
 Channel 0 is refused by the constructor; it must be given explicitly.
 
-## USB ports — no ambiguity
+## USB ports — ROLE ALIASES ONLY (changed 2026-07-23)
 
-Pin by VID:PID / serial, **not** by the `ttyACMx`/`ttyUSBx` index — those
-renumber, and one just did (see the 2026-07-21 change below).
+**Never reference raw `ttyACMx`/`ttyUSBx` — they renumber and have burned three
+different upload_port schemes.** udev provides stable role aliases, and the
+**SSOT for the mapping is `pac-garage-alarm/platformio.ini` section
+`[pac_serial]`** (`alias = vid|serial`) — the same file that consumes the alias
+via `upload_port`. To change/add devices: edit that section, then run
+`mt-transport/tools/setup-serial-udev.sh` (idempotent; regenerates
+`/etc/udev/rules.d/99-pac-serial.rules` wholesale).
 
-| device | role | node path (2026-07-21) | VID:PID | serial | stability |
-|---|---|---|---|---|---|
-| **RAK4631** (nRF52) | **upload** + `Serial` USB-CDC (logs) | `/dev/ttyACM0` | `239a:8029` | `B8CBA9794FF6FA1E` | **RENUMBERS on reflash**. Now the ONLY RAK port. |
-| **M5 Timer Camera X** (ESP32) | **upload + `Serial` console** (own USB) | `/dev/ttyUSB0` | Hades2001 M5stack | `5D52ADF916` | own USB, unaffected by the RAK |
+| alias | device | role | properties |
+|---|---|---|---|
+| **/dev/rak-cdc** | RAK4631 native USB (VID `239a`, no serial filter) | **flash target** + CDC log | matches app AND bootloader mode → survives mid-flash renumbering. CDC log is DTR-gated and DIES during reflash |
+| **/dev/rak-debug** | WCH adapter `1a86` / `5B1F007437` | **hardware debug tap** — PRIMARY log channel | Serial2/UARTE1 TX-only on WB_IO1 (pin 17), 115200. No DTR, host-independent, survives reflashes, catches boot banners/CAMPROBE from t=0 |
+
+- **WB_IO2 is OFF-LIMITS for I/O — it IS `PIN_3V3_EN`**, the PIR/env sensor
+  rail enable. Wiring anything to it fights the rail.
+- **The TimerCam has NO USB in the deployed configuration** (2026-07-23): it is
+  powered BY the RAK through the harness, and its USB **must never be connected
+  simultaneously — back-power** (Peter). `ttyUSB0` absent is NORMAL. Reflashing
+  the camera = disconnect harness power FIRST, then USB
+  (`pio run -e timercam -t upload`; its ini pins the FTDI by serial).
+- Camera harness (2026-07-23): G4↔RAK pin16 (TX1), G13↔RAK pin15 (RX1); camera
+  fw pins RX=4/TX=13 via build flags, ext0 wake FOLLOWS CAM_UART_RX.
+- Field diagnosis trick: camera LED flashes on capture → the RAK→camera
+  downlink + wake are proven; a failing grab with a flashing LED means the
+  uplink conductor.
 
 ### CHANGE 2026-07-21 — debug adapter removed, camera moved to UART
 
@@ -172,46 +190,43 @@ from the bench.** Consequences, all verified this session:
   it** (Grove G4/G13 ↔ RAK 15/16). In `CAM_UART` builds `Serial1` is the **camera
   link**; `DBG` no longer mirrors there (else debug text clocks at the camera).
   Do NOT read `Serial1` as a log source.
-- **RAK logs are now USB-only** (`Serial`, `ttyACM0`), which **drops during flash**
-  and the bootloader window. There is no longer a battery-independent, reflash-stable
-  log tap — the memory `rak-debug-uart-is-stable` is now WRONG and superseded. If a
-  stable tap is needed again, add a CH343 on spare pins, NOT on 15/16.
+- **SUPERSEDED 2026-07-23 — RAK logs are NO LONGER USB-only.** `DBG` now mirrors
+  to a hardware debug tap (`Serial2`/UARTE1, TX-only on **WB_IO1 = pin 17**),
+  read at `/dev/rak-debug`. The tap is the CH343-on-spare-pins fix this
+  paragraph used to call for — battery-independent, reflash-stable, no DTR.
 
-- All ports **115200** baud. Cam board = `m5stack-timer-cam` (ESP32; `psram=4194304`
-  = **4 MiB** measured, not the 8 MB sometimes quoted).
-- **Flash the RAK:** `pio run -e rak4631_camuart -t upload --upload-port /dev/ttyACM0`
-  (auto-detect also works). 1200 bps touch → bootloader → nrfutil → reboot; the port
-  renumbers mid-cycle and pio waits it out.
-- **Flash the camera:** `pio run -e timercam_uart -t upload` over `ttyUSB0` (own USB —
-  the adapter removal did not affect this).
-- **Watching a log — the two boards need OPPOSITE handling. Get this wrong and you
-  get silence that looks like a dead board.**
-  - **RAK4631 (`ttyACM0`) — DTR must be ASSERTED.** `Serial` is TinyUSB **USB CDC**,
-    and CDC only emits once the host raises DTR; the firmware's own comment says so
-    (`main.cpp` setup: *"Serial is USB CDC and its operator bool() is DTR-based"*).
-    **`cat /dev/ttyACM0` does NOT raise DTR — it returns absolutely nothing**, even
-    while the device is alive and transmitting on air. Flashing does not need DTR
-    either, so uploads succeed while reads stay mute: a genuinely misleading pair.
-    Working headless recipe:
-    ```bash
-    /usr/share/pac/py/bin/python - <<'PY'
-    import serial, time
-    s = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
-    s.dtr = True; s.rts = True          # <-- the whole trick
-    time.sleep(0.3); s.reset_input_buffer()
-    end = time.time() + 30
-    while time.time() < end:
-        ln = s.readline()
-        if ln: print(ln.decode('utf-8','replace').rstrip(), flush=True)
-    PY
-    ```
-    `pio device monitor` also asserts DTR but requires a TTY, so it dies headless with
-    a `start_terminal` traceback.
-  - **M5 camera (`ttyUSB0`, ESP32) — DTR/RTS deasserted**, because there they are
-    wired to reset/boot and asserting them RESETS the board.
+### Pin / IO map (RAK4631, 2026-07-23)
+
+| function | RAK pin | peripheral | far end |
+|---|---|---|---|
+| Camera UART RX | 15 (P0.15, "RX1") | Serial1/UARTE0 | camera TX = G13 |
+| Camera UART TX | 16 (P0.16, "TX1") | Serial1/UARTE0 | camera RX = G4 (also its ext0 wake — the start bit is the wake pulse) |
+| Debug tap TX | **17 (WB_IO1)** | Serial2/UARTE1 | WCH adapter → `/dev/rak-debug` |
+| (Serial2 RX) | 8 (P0.08, default) | Serial2/UARTE1 | unconnected, unused |
+| Sensor rail enable | **34 (WB_IO2 = PIN_3V3_EN)** | GPIO OUT HIGH | 3V3_S rail: PIR + env sensor — **NEVER use for I/O** |
+| PIR | 10 | GPIO IRQ (RISING = release) | RAK12006 / AM312 |
+| Flash + CDC log | — (native USB) | TinyUSB | `/dev/rak-cdc` |
+
+- All UARTs **115200** baud. Cam board = `m5stack-timer-cam` (ESP32;
+  `psram=4194304` = **4 MiB** measured, not the 8 MB sometimes quoted).
+- **Flash the RAK:** `pio run -e rak4631_camuart -t upload` — `upload_port` is
+  `/dev/rak-cdc` from the ini (the `[pac_serial]` SSOT). 1200 bps touch →
+  bootloader → nrfutil → reboot; the alias survives the mid-cycle renumbering.
+- **Flash the camera:** disconnect harness power FIRST (back-power!), connect
+  its USB, `pio run -e timercam -t upload`.
+- **Watching a log — prefer the tap.**
+  - **`/dev/rak-debug` — the PRIMARY channel.** Plain read, no control lines,
+    keeps printing through reflashes, catches boot banners/CAMPROBE from t=0.
+    `python3 -c "import serial; s=serial.Serial('/dev/rak-debug',115200,timeout=1); [print(s.readline().decode('utf-8','replace'),end='') for _ in range(100)]"`
+  - **`/dev/rak-cdc` (fallback) — DTR must be ASSERTED.** `Serial` is TinyUSB
+    USB CDC and only emits once the host raises DTR; `cat` returns NOTHING.
+    Recipe: pyserial open + `s.dtr = True; s.rts = True`. Drops during flash.
+  - **M5 camera console — normally UNAVAILABLE** (no USB in the deployed
+    config). When flashing (harness power off, USB on): DTR/RTS **deasserted**
+    — they are wired to reset/boot and asserting them resets the board.
 - **When RAK serial is silent, check in this order** (both causes were hit on
   2026-07-22): (1) a leaked/orphaned reader still holding the port — look for
-  `ttyACM0` in `/proc/*/fd`; (2) DTR not asserted, per above. Silence is **not**
+  a leaked reader holding `/dev/rak-cdc` (check `/proc/*/fd`); (2) DTR not asserted, per above. Silence is **not**
   evidence the board is dead — confirm liveness positively via the gateway's
   `last_heard`, not by absence of output.
 - The remote unit is never on USB here — only the bench unit is attached (memory
