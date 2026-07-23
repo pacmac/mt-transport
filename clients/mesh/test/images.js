@@ -166,7 +166,22 @@ async function testResume() {
   ok(buf.equals(payload), 'resume: completes from a persisted partial (repair-only device)');
 }
 
+// ---- 7. grab: cam grab -> poll list until a fresh pid -> fetch (logic isolated) ----
+async function testGrab() {
+  const ref = {};
+  const images = makeImages(makeDevice(ref, {}), mkTmp());
+  ref.obj = images;
+  let sent = null, grabbed = null, calls = 0;
+  images.send = async (node, text) => { sent = text; };
+  images.list = async () => ({ ready: true, pid: (++calls >= 2 ? 999 : 1) }); // pid changes after the grab
+  images.get = async (node, pid) => { grabbed = pid; return Buffer.from('JPEGDATA'); };
+  const r = await images.grab('336b', { pollMs: 5, timeoutMs: 500 });
+  ok(sent === 'cam grab', 'grab: fires `cam grab`');
+  ok(r.pid === 999 && grabbed === 999, 'grab: polls until a FRESH pid, then fetches it');
+  ok(r.bytes === 8 && r.buf.equals(Buffer.from('JPEGDATA')), 'grab: returns { pid, bytes, buf }');
+}
+
 Promise.resolve()
-  .then(testGet).then(testAutonomous).then(testResume)
+  .then(testGet).then(testAutonomous).then(testResume).then(testGrab)
   .then(() => console.log(`images OK: ${pass} assertions passed`))
   .catch((e) => { console.error('images FAILED:', e && e.stack || e); process.exit(1); });

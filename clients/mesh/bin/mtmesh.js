@@ -6,6 +6,7 @@
 // Mesh API, which throws NotImplemented — surfaced cleanly.
 'use strict';
 const { Mesh, errors } = require('..');
+const fs = require('fs');
 
 // ---- verb table: {verb, target, args, help, run(m,target,args,flags)} ----------
 // Grammar is target-first: `mtmesh <target> <verb> [args]`. `target: true` verbs
@@ -20,7 +21,19 @@ const VERBS = [
   { verb: 'image list',  target: true,  args: '',              help: 'list available images',
     run: (m, t) => m.listImages(t) },
   { verb: 'image get',   target: true,  args: '<pid> [--out FILE]', help: 'fetch an image',
-    run: (m, t, a, o) => m.getImage(t, a[0], { out: o.out }) },
+    run: async (m, t, a, o) => {
+      const buf = await m.getImage(t, a[0]);
+      const res = { pid: Number(a[0]), bytes: buf.length };
+      if (o.out) { fs.writeFileSync(o.out, buf); res.out = o.out; }  // CLI owns file paths
+      return res;                                                    // summary, never the raw Buffer
+    } },
+  { verb: 'image grab',  target: true,  args: '[--out FILE]', help: 'capture a fresh photo, then fetch it',
+    run: async (m, t, a, o) => {
+      const g = await m.grabImage(t);                                // { pid, bytes, buf }
+      const res = { pid: g.pid, bytes: g.bytes };
+      if (o.out) { fs.writeFileSync(o.out, g.buf); res.out = o.out; }
+      return res;
+    } },
   { verb: 'config get',  target: true,  args: '',              help: 'read device config',
     run: (m, t) => m.getConfig(t) },
   { verb: 'config set',  target: true,  args: '<key> <value>', help: 'set device config (validated)',

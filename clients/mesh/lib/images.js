@@ -183,6 +183,30 @@ class Images {
     };
   }
 
+  // Capture a fresh photo then fetch it. `cam grab` is answered by the device PUBLISHING
+  // the new image (not a text reply), so we fire it and poll list() until a NEW pid is
+  // ready, then get() it. This is the flow that verified the pipeline live (pid 60780).
+  async grab(node, { pollMs = 2000, timeoutMs = 30000 } = {}) {
+    // Cap each poll: list() carries the idempotent retry, which can block for tens of
+    // seconds on a congested link — a single slow poll must not stall the whole grab.
+    const listOnce = () => Promise.race([
+      this.list(node).catch(() => null),
+      new Promise((r) => setTimeout(() => r(null), 4000)),
+    ]);
+    const before = (await listOnce()) || {};
+    await this.send(node, 'cam grab');                       // trigger capture (fire-and-forget)
+    const deadline = Date.now() + timeoutMs;
+    let st = null;
+    while (Date.now() < deadline) {
+      await sleep(pollMs);
+      st = await listOnce();
+      if (st && st.ready && st.pid && st.pid !== before.pid) break;   // a fresh capture is published
+    }
+    if (!(st && st.ready && st.pid)) throw new MeshError('grab: no fresh capture published in time', 'EGRAB');
+    const buf = await this.get(node, st.pid);
+    return { pid: st.pid, bytes: buf.length, buf };
+  }
+
   startListener() {
     this.listening = true;
     this.log.info('image listener ON (autonomous auto-upload catch)');
