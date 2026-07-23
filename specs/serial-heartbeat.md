@@ -1,8 +1,8 @@
 ---
 task: serial-heartbeat
-status: SPEC 2026-07-22 — silence on serial is ambiguous; make liveness unconditional.
+status: SHIPPED — HB live since 2026-07-22; stk=/heap= added 2026-07-23 (fw 2-260723-1), format line corrected.
 priority: observability — the absence of this cost most of an evening
-source_hash: (pac-garage-alarm) src/main.cpp 8232fda4a47a4781b6323a98fd6dfa94a328a3bd7ca7ed62e76aa580325a2a54
+source_hash: (pac-garage-alarm) src/main.cpp b44c1d56c66d1e5ca60262bdc8000347aadeff8af2432308d6b4bf9469c2353c
 project: pac-garage-alarm
 scope:
   - (pac-garage-alarm) src/main.cpp   # periodic heartbeat line on the debug serial
@@ -33,7 +33,11 @@ probing, no crafted mesh traffic, no reset to "get a boot banner".
 A single line emitted from `loop()` every `HEARTBEAT_MS`, millis-scheduled (never `delay()`),
 carrying the state that answers the questions actually asked during a fault:
 
-    HB up=<s> boot=<n> rst=0x<hex> txfs=<n> csma=<n> txq=<n> rx=<s ago> heap=<n>
+    HB up=<s> boot=<n> rst=0x<hex> txfs=<n> csma=<n> tx=<0|1> rx=<s ago> pki=<ok/nokey/authfail> pkifrom=<hex> stk=<B> heap=<B>
+
+(Format line corrected 2026-07-23 to match the shipped implementation: `tx=` is
+mesh.busy() 0/1, not a queue depth — the txq= in the first draft never shipped;
+pki=/pkifrom= were added by ta2m-dm-observability. stk=/heap= added below.)
 
 - `up` — seconds since boot. A resetting unit shows `up` sawtoothing; a boot loop is obvious
   from the heartbeat alone, with no dmesg archaeology.
@@ -46,7 +50,14 @@ carrying the state that answers the questions actually asked during a fault:
   wedged".
 - `rx` — seconds since the last received packet. Separates "we are deaf" from "nobody is
   talking", which no other signal on the device does.
-- `heap` — free heap, to catch a slow leak.
+- `heap` — free heap (`dbgHeapFree()`, core utility/debug.h), to catch a slow leak.
+- `stk` — ADDED 2026-07-23 (pre-deployment candidate 2-260723-1): loop-task stack
+  headroom in BYTES, `uxTaskGetStackHighWaterMark(NULL) * 4` — the LOWEST-EVER free
+  stack since boot, measured by FreeRTOS. Rationale: wdt-pki-reply proved the 4 KB
+  loop stack overflows silently (method-1 checking is blind between context
+  switches); the static worst-chain sum is now ~3.3 KB and this field turns the
+  remaining-margin question into continuous live measurement on a unit we cannot
+  reach. A falling stk across a session names the code that grew the stack.
 
 `HEARTBEAT_MS = 5000`. 1 s is unnecessary noise for a fault that develops over minutes, and it
 would bury the event lines that carry the real detail; 5 s still detects a hang within one
