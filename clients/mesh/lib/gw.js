@@ -11,6 +11,7 @@
 'use strict';
 const WebSocket = require('ws');
 const { MeshError } = require('./errors');
+const log = require('./log').log.child('gw');
 
 const BROADCAST = null; // `to` omitted => broadcast (0xFFFFFFFF) at the gateway
 
@@ -42,27 +43,39 @@ class Gateway {
   _open() {
     if (this.stopped) return;
     // maxPayload:0 is NOT optional — see header.
-    const ws = new WebSocket(`ws://${this.host}:${this.port}${this.eventsPath}`, { maxPayload: 0 });
+    const url = `ws://${this.host}:${this.port}${this.eventsPath}`;
+    log.debug('connecting', url);
+    const ws = new WebSocket(url, { maxPayload: 0 });
     this.ws = ws;
     ws.on('open', () => {
+      log.debug('ws open', url);
       const waiters = this._openWaiters; this._openWaiters = [];
       for (const w of waiters) w.res();
     });
     ws.on('message', (raw) => {
       let e;
-      try { e = JSON.parse(raw); } catch { return; }
-      if (e.type === 'device_snapshot') { this.snapshot = e; return; }
+      try { e = JSON.parse(raw); } catch { log.trace('drop non-JSON ws frame'); return; }
+      if (e.type === 'device_snapshot') {
+        this.snapshot = e;
+        log.debug('snapshot: %d devices', Array.isArray(e.devices) ? e.devices.length : 0);
+        return;
+      }
       const norm = this._normalize(e);
-      if (norm) for (const h of this.handlers) { try { h(norm); } catch { /* a throwing handler must not kill the stream */ } }
+      if (norm) for (const h of this.handlers) {
+        // A throwing handler must not kill the stream — log and carry on.
+        try { h(norm); } catch (err) { log.warn('event handler threw', err); }
+      }
     });
     ws.on('close', () => {
       if (this.stopped) return;
+      log.info('ws closed; reconnecting in %dms', this.reconnectMs);
       setTimeout(() => this._open(), this.reconnectMs);
     });
     // Surface errors to handlers but never throw into the process. A failed
     // initial connect rejects the connect() promise.
     ws.on('error', (err) => {
-      for (const h of this.handlers) { try { h({ kind: 'error', error: err }); } catch { /* ignore */ } }
+      log.error('ws error', err);
+      for (const h of this.handlers) { try { h({ kind: 'error', error: err }); } catch (e2) { log.trace('error-handler threw', e2); } }
       const waiters = this._openWaiters; this._openWaiters = [];
       for (const w of waiters) w.rej(err instanceof Error ? err : new Error(String(err)));
     });
@@ -128,12 +141,14 @@ class Gateway {
     const body = { text, channel };
     if (to !== BROADCAST) body.to = to;
     if (replyId != null) body.reply_id = replyId;
+    log.debug('send', { gwId, channel, to: to === BROADCAST ? 'bcast' : to, bytes: Buffer.byteLength(text, 'utf8') });
+    log.trace('send text', text);
     const r = await fetch(`http://${this.host}:${this.sendPort}/${gwId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new MeshError(`gateway send failed: ${r.status}`, 'EGWSEND');
+    if (!r.ok) { log.warn('gateway send failed: %d', r.status); throw new MeshError(`gateway send failed: ${r.status}`, 'EGWSEND'); }
     return r.json(); // {id, to}
   }
 

@@ -6,6 +6,7 @@ gw:
   sendPort: 8000
   eventsPath: /events
 channel: 2             # never 0 (PRIMARY)
+logLevel: info         # silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides
 paths:
   store: ./payloads
   log:   ./mtmesh.log

@@ -8,6 +8,7 @@ const { ni } = require('./errors');
 const DEFAULTS = Object.freeze({
   gw:      { host: 'localhost', port: 8000, sendPort: 8000, eventsPath: '/events' },
   channel: 2, // never 0
+  logLevel: 'info', // silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides. See lib/log.js.
   paths:   { store: './payloads', log: './mtmesh.log' },
   timing:  { sendSpacingMs: 3000, replyTimeoutMs: 20000, wsMaxPayload: 0,
              chunkAnswerMs: 8000, idleMs: 240000, pushDeadlineMs: 900000 },

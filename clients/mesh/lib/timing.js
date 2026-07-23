@@ -15,6 +15,7 @@
 // socket and unit-tests with fake thunks. index.js wires gw<->timing in phase 3.
 'use strict';
 const { MeshError } = require('./errors');
+const log = require('./log').log.child('timing');
 
 class Timing {
   constructor(cfg) {
@@ -50,7 +51,7 @@ class Timing {
       const existing = (this.inFlight && this.inFlight.key === opts.dedupKey)
         ? this.inFlight
         : this.q.find((e) => e.key === opts.dedupKey);
-      if (existing) return existing.promise;
+      if (existing) { log.debug('dedup: returning in-flight promise', opts.dedupKey); return existing.promise; }
     }
 
     let resolve, reject;
@@ -65,6 +66,7 @@ class Timing {
     };
     this.q.push(entry);
     this.q.sort((a, b) => b.priority - a.priority);
+    log.trace('enqueue', { priority: entry.priority, dedupKey: entry.key, pending: this.pending });
     this._pump();
     return promise;
   }
@@ -78,6 +80,7 @@ class Timing {
     clearTimeout(this.inFlight.timer);
     const e = this.inFlight;
     this.inFlight = null;
+    log.trace('reply matched');
     e.resolve(replyObj);
     this._pump();
     return true;
@@ -100,9 +103,11 @@ class Timing {
     const e = this.q.shift();
     this.inFlight = e;
     this.lastSentAt = Date.now();
+    log.trace('send', { priority: e.priority, noReply: !!e.opts.noReply });
     try {
       await e.thunk();
     } catch (err) {
+      log.warn('send threw', err);
       this.inFlight = null;
       e.reject(err);
       return this._pump();
@@ -120,6 +125,7 @@ class Timing {
     // timeout is a real answer rather than an anomaly.
     e.timer = setTimeout(() => {
       this.inFlight = null;
+      log.debug('timeout', { retriesLeft: e.retries });
       if (e.retries > 0) { e.retries--; this.q.unshift(e); }
       else e.reject(new MeshError(`timeout: reply not received`, 'ETIMEOUT'));
       this._pump();
