@@ -51,6 +51,10 @@ pki=/pkifrom= were added by ta2m-dm-observability. stk=/heap= added below.)
 - `rx` — seconds since the last received packet. Separates "we are deaf" from "nobody is
   talking", which no other signal on the device does.
 - `heap` — free heap (`dbgHeapFree()`, core utility/debug.h), to catch a slow leak.
+- stk/heap ALSO in the @status packet (Peter 2026-07-23, fw 2-260723-2): two trailing
+  JOPT fields in buildStatus before `cons` — present when the packet has room, shed
+  silently when not (jsonBuild semantics). Makes both readable remotely on the
+  deployed unit via @status, no cable needed.
 - `stk` — ADDED 2026-07-23 (pre-deployment candidate 2-260723-1): loop-task stack
   headroom in BYTES, `uxTaskGetStackHighWaterMark(NULL) * 4` — the LOWEST-EVER free
   stack since boot, measured by FreeRTOS. Rationale: wdt-pki-reply proved the 4 KB
