@@ -1,20 +1,157 @@
 // mesh-gw transport. The ONLY code that knows mesh-gw exists. Grounded against
-// live OpenAPI 2026-07-23: SEND = POST /{gwId}/messages {text,channel};
-// RECEIVE = event stream /events (SSE) -> private_app (260/261) + text;
-// reads = GET /nodes /status /{gwId}/info. mesh-gw is LIVE — never modify it.
-// (Bodies implemented in mesh-transport phase.)
+// live docs 2026-07-23 (mesh-gw/docs/API_REST.md + API_SSE.md):
+//   SEND    = POST /{gwId}/messages {text, channel, to?, reply_id?} -> {id,to}
+//   RECEIVE = WebSocket ws://<host>/events  (NOT SSE — API_SSE.md: "There is no
+//             SSE transport"), needs maxPayload:0 (multi-MB device_snapshot trips
+//             ws's 1 MB default and closes 1009). private_app -> {portnum,
+//             payload_b64}; text -> {data.text, from_num, channel, packet_id}.
+//   READS   = GET /{gwId}/nodes , /{gwId}/status ; info() returns the WS snapshot.
+// mesh-gw is LIVE — never modify it; this module adapts to it. Nothing here is
+// hard-coded: every host/port/path comes from cfg (settings).
 'use strict';
-const { ni } = require('./errors');
+const WebSocket = require('ws');
+const { MeshError } = require('./errors');
+
+const BROADCAST = null; // `to` omitted => broadcast (0xFFFFFFFF) at the gateway
 
 class Gateway {
-  constructor(cfg) { this.cfg = cfg; }        // cfg from settings (gw host/port/paths)
-  async connect() { return ni('gw.connect'); }        // open the event stream
-  async close() { return ni('gw.close'); }
-  async sendText(gwId, text, channel) { return ni('gw.sendText'); } // POST messages
-  onEvent(handler) { return ni('gw.onEvent'); }       // private_app + text events
-  async nodes() { return ni('gw.nodes'); }
-  async status() { return ni('gw.status'); }
-  async info(gwId) { return ni('gw.info'); }
+  // cfg = resolved settings; uses cfg.gw.{host,port,sendPort,eventsPath,reconnectMs}
+  constructor(cfg) {
+    this.cfg = cfg;
+    const gw = (cfg && cfg.gw) || {};
+    this.host = gw.host;
+    this.port = gw.port;
+    this.sendPort = gw.sendPort != null ? gw.sendPort : gw.port;
+    this.eventsPath = gw.eventsPath || '/events';
+    this.reconnectMs = gw.reconnectMs != null ? gw.reconnectMs : 5000;
+    this.ws = null;
+    this.stopped = false;
+    this.handlers = new Set();
+    this.snapshot = null;       // last device_snapshot from the event stream
+    this._openWaiters = [];
+  }
+
+  // Open the event stream. Resolves once the socket is open. Reconnects on close
+  // (the gateway sends no keep-alive; it re-sends a fresh snapshot on reconnect).
+  async connect() {
+    const p = new Promise((res, rej) => this._openWaiters.push({ res, rej }));
+    this._open();
+    return p;
+  }
+
+  _open() {
+    if (this.stopped) return;
+    // maxPayload:0 is NOT optional — see header.
+    const ws = new WebSocket(`ws://${this.host}:${this.port}${this.eventsPath}`, { maxPayload: 0 });
+    this.ws = ws;
+    ws.on('open', () => {
+      const waiters = this._openWaiters; this._openWaiters = [];
+      for (const w of waiters) w.res();
+    });
+    ws.on('message', (raw) => {
+      let e;
+      try { e = JSON.parse(raw); } catch { return; }
+      if (e.type === 'device_snapshot') { this.snapshot = e; return; }
+      const norm = this._normalize(e);
+      if (norm) for (const h of this.handlers) { try { h(norm); } catch { /* a throwing handler must not kill the stream */ } }
+    });
+    ws.on('close', () => {
+      if (this.stopped) return;
+      setTimeout(() => this._open(), this.reconnectMs);
+    });
+    // Surface errors to handlers but never throw into the process. A failed
+    // initial connect rejects the connect() promise.
+    ws.on('error', (err) => {
+      for (const h of this.handlers) { try { h({ kind: 'error', error: err }); } catch { /* ignore */ } }
+      const waiters = this._openWaiters; this._openWaiters = [];
+      for (const w of waiters) w.rej(err instanceof Error ? err : new Error(String(err)));
+    });
+  }
+
+  // Register an event handler. Returns an unsubscriber.
+  onEvent(handler) {
+    this.handlers.add(handler);
+    return () => this.handlers.delete(handler);
+  }
+
+  async close() {
+    this.stopped = true;
+    if (this.ws) this.ws.close();
+  }
+
+  // gw stays dumb: it maps mesh-gw envelopes to a small normalized shape and
+  // leaves interpretation (protocol/model) to the layers above.
+  _normalize(e) {
+    if (e.type === 'private_app') {
+      return {
+        kind: 'app',
+        portnum: e.portnum,
+        payload: Buffer.from(e.payload_b64 || '', 'base64'),
+        from: e.node_id || (e.from_num != null ? String(e.from_num) : null),
+        raw: e,
+      };
+    }
+    if (e.type === 'text') {
+      return {
+        kind: 'text',
+        text: e.data && e.data.text,
+        from: e.node_id || (e.from_num != null ? String(e.from_num) : null),
+        channel: e.channel,
+        packetId: e.packet_id,
+        replyId: (e.data && e.data.reply_id) != null ? e.data.reply_id : null,
+        raw: e,
+      };
+    }
+    if (e.type === 'message_status') {
+      return { kind: 'status', packetId: e.packet_id, status: e.status, raw: e };
+    }
+    return null; // everything else is stock Meshtastic — not our concern here
+  }
+
+  // Send a text message via the gateway. opts: {channel, to, replyId}.
+  //   - text is capped at 228 UTF-8 bytes (API_REST.md).
+  //   - BROADCAST (to==null) on channel 0 is REFUSED — PRIMARY is the public mesh
+  //     and a broadcast there leaks alarm traffic to every node in range. A
+  //     DIRECTED message (to set) is allowed on any channel: a PKC DM legitimately
+  //     rides channel 0.
+  async sendText(gwId, text, opts = {}) {
+    const { channel, to = BROADCAST, replyId = null } = opts;
+    if (Buffer.byteLength(text, 'utf8') > 228) {
+      throw new MeshError(`text too long: ${Buffer.byteLength(text, 'utf8')} > 228 bytes`, 'ETEXTLEN');
+    }
+    if (channel == null) {
+      throw new MeshError('channel must be given explicitly (never defaulted to 0/PRIMARY)', 'ECHAN0');
+    }
+    if (to === BROADCAST && channel === 0) {
+      throw new MeshError('refusing to broadcast on channel 0 (PRIMARY)', 'ECHAN0');
+    }
+    const body = { text, channel };
+    if (to !== BROADCAST) body.to = to;
+    if (replyId != null) body.reply_id = replyId;
+    const r = await fetch(`http://${this.host}:${this.sendPort}/${gwId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new MeshError(`gateway send failed: ${r.status}`, 'EGWSEND');
+    return r.json(); // {id, to}
+  }
+
+  async nodes(gwId) {
+    const r = await fetch(`http://${this.host}:${this.sendPort}/${gwId}/nodes`);
+    if (!r.ok) throw new MeshError(`gateway nodes failed: ${r.status}`, 'EGWREAD');
+    return r.json();
+  }
+
+  async status(gwId) {
+    const r = await fetch(`http://${this.host}:${this.sendPort}/${gwId}/status`);
+    if (!r.ok) throw new MeshError(`gateway status failed: ${r.status}`, 'EGWREAD');
+    return r.json();
+  }
+
+  // The authoritative device metadata is the WS device_snapshot, not a REST call
+  // (avoids depending on an unverified /info route). Null until connect+snapshot.
+  info(_gwId) { return this.snapshot; }
 }
 
-module.exports = { Gateway };
+module.exports = { Gateway, BROADCAST };
