@@ -52,6 +52,11 @@ function makeDevice() {
         state.hop = Number(args[1]); state.gap = Number(args[2]);
         return { type: 'chunkcfg', hop: state.hop, gap: state.gap };
       }
+      if (verb === 'name' || verb === 'lname') {              // text set: reply echoes the new value
+        const was = state[verb] || '';
+        state[verb] = args[0];
+        return { type: verb, name: args[0], was, ok: true };
+      }
       return {};
     },
     send: async (node, text) => {
@@ -147,6 +152,18 @@ function makeDevice() {
     let ef = null;
     try { await cfg.set('b80f', { 'det.n': 5 }); } catch (e) { ef = e.code; }
     ok(ef === 'EFIELD', 'fallback: a non-mapped field without schema -> EFIELD (honest)');
+  }
+
+  // ---- 7. TEXT set (name/lname): confirm from the write reply + length bounds ----
+  {
+    const { cfg } = makeDevice();
+    const r = await cfg.set('b80f', { name: 'BNCH' });
+    ok(r.confirmed && r.set.name === 'BNCH', 'text: set name -> confirmed from write reply');
+    const r2 = await cfg.set('b80f', { lname: 'BNCH' });
+    ok(r2.confirmed && r2.set.lname === 'BNCH', 'text: set lname -> confirmed');
+    let code = null;
+    try { await cfg.set('b80f', { name: 'TOOLONG' }); } catch (e) { code = e.code; }
+    ok(code === 'ERANGE', 'text: over-length name (7>4) -> ERANGE (no send)');
   }
 
   console.log(`config OK: ${pass} assertions passed`);

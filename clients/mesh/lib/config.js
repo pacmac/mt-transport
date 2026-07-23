@@ -14,11 +14,18 @@ const { MeshError } = require('./errors');
 // on 260) is unreachable — mesh-gw send is text-only — so each writable field maps to a
 // text command here. EXTENSIBLE: add an entry per field. chunk.* is what the gap-sweep
 // needs now. `chunk cfg <hop> <gap>` sets BOTH, so write() carries the unchanged sibling.
+// needsCurrent: read the current value first (chunk cfg sets BOTH hop+gap, so we must
+// carry the unchanged sibling). confirm(): validate from the WRITE reply — every write
+// echoes its result (chunk cfg -> {hop,gap}; name/lname -> {name,ok}) — so no read-back.
 const COMMAND_MAP = {
-  'chunk.gap': { verb: 'chunk', readArgs: ['cfg'], curKey: 'gap',
-                 write: (cur, v) => ['cfg', String(cur.hop), String(v)] },
-  'chunk.hop': { verb: 'chunk', readArgs: ['cfg'], curKey: 'hop',
-                 write: (cur, v) => ['cfg', String(v), String(cur.gap)] },
+  'chunk.gap': { needsCurrent: true, readVerb: 'chunk', readArgs: ['cfg'], writeVerb: 'chunk',
+                 write: (cur, v) => ['cfg', String(cur.hop), String(v)],
+                 confirm: (r, v) => !!(r && Number(r.gap) === v) },
+  'chunk.hop': { needsCurrent: true, readVerb: 'chunk', readArgs: ['cfg'], writeVerb: 'chunk',
+                 write: (cur, v) => ['cfg', String(v), String(cur.gap)],
+                 confirm: (r, v) => !!(r && Number(r.hop) === v) },
+  'name':  { writeVerb: 'name',  write: (cur, v) => [v], confirm: (r, v) => !!(r && r.ok && r.name === v) },
+  'lname': { writeVerb: 'lname', write: (cur, v) => [v], confirm: (r, v) => !!(r && r.ok && r.name === v) },
 };
 
 // Writable fields with no device read command — surfaced by get() as `unread`,
@@ -32,6 +39,8 @@ const UNREAD_FIELDS = ['mute', 'push.auto', 'tele.chg', 'tele.ka', 'name', 'lnam
 const FALLBACK_FIELDS = {
   'chunk.gap': { id: 'chunk.gap', ty: 'n', label: 'Chunk gap ms', writable: true, min: 0, max: 60000, bounded: true },
   'chunk.hop': { id: 'chunk.hop', ty: 'n', label: 'Chunk hops', writable: true, min: 0, max: 7, bounded: true },
+  'name':  { id: 'name',  ty: 't', label: 'Short name', writable: true, min: 1, max: 4,  bounded: true }, // mn/mx are LENGTHS
+  'lname': { id: 'lname', ty: 't', label: 'Long name',  writable: true, min: 1, max: 30, bounded: true }, // device validateName caps 24; confirm catches over-cap
 };
 
 // One ragged schema row -> a field descriptor. Rows (from fmtField in the firmware):
@@ -168,20 +177,25 @@ class Config {
         v = Number(raw);
         if (!Number.isFinite(v) || !Number.isInteger(v)) throw new MeshError(`${field}: expected an integer`, 'EVALUE');
         if (f.bounded && (v < f.min || v > f.max)) throw new MeshError(`${field} out of range [${f.min},${f.max}]`, 'ERANGE');
+      } else if (f.ty === 't') {
+        v = String(raw);
+        if (f.bounded && (v.length < f.min || v.length > f.max))
+          throw new MeshError(`${field}: length ${v.length} out of [${f.min},${f.max}]`, 'ERANGE');
       } else {
-        throw new MeshError(`${field}: text set not supported yet`, 'ENOMAP');
+        throw new MeshError(`${field}: unsupported type ${f.ty}`, 'EVALUE');
       }
 
       const map = COMMAND_MAP[field];
       if (!map) throw new MeshError(`${field} valid but no transport mapping yet`, 'ENOMAP');
 
-      const cur = await this.command(node, map.verb, map.readArgs);
-      if (!cur || typeof cur !== 'object') throw new MeshError(`${field}: could not read current value`, 'ECONFIRM');
-      await this.command(node, map.verb, map.write(cur, v));
-      const after = await this.command(node, map.verb, map.readArgs);
-      if (!after || Number(after[map.curKey]) !== v) {
-        throw new MeshError(`${field}: set not confirmed (want ${v}, got ${after && after[map.curKey]})`, 'ECONFIRM');
+      // chunk.* must preserve its sibling, so read current first; text fields don't.
+      let cur = null;
+      if (map.needsCurrent) {
+        cur = await this.command(node, map.readVerb, map.readArgs);
+        if (!cur || typeof cur !== 'object') throw new MeshError(`${field}: could not read current value`, 'ECONFIRM');
       }
+      const reply = await this.command(node, map.writeVerb, map.write(cur, v));
+      if (!map.confirm(reply, v)) throw new MeshError(`${field}: set not confirmed`, 'ECONFIRM');
       out[field] = v;
     }
     return { set: out, confirmed: true };
