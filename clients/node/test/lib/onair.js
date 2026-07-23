@@ -139,7 +139,10 @@ async function runCommands(opts) {
   const pollAcks = async () => {
     for (const r of recs) {
       if (r.packetId == null) continue;
-      if (r.ackStatus && r.ackStatus !== 'sent') continue; // terminal state reached
+      // 'sent' and 'queued' are IN-FLIGHT states — keep polling through them.
+      // (Treating 'queued' as terminal froze the status there forever and
+      // produced false ack failures, found 2026-07-23.)
+      if (r.ackStatus && r.ackStatus !== 'sent' && r.ackStatus !== 'queued') continue;
       try {
         const st = await findOutboundStatus(o.host, r.packetId);
         if (st && st !== r.ackStatus) {
@@ -166,6 +169,17 @@ async function runCommands(opts) {
   // This is the exact boundary that produced a false "no reply" today.
   await sleep(1500);
   try { collect(await getMessages(o.host), true); } catch { /* transient */ }
+  // Ack states lag the reply by seconds (gateway BLE sync). When an ack assertion
+  // was requested, wait — bounded — for every packet to reach a terminal state.
+  if (o.expectAck === 'acked') {
+    const ackDeadline = Date.now() + 8000;
+    while (Date.now() < ackDeadline &&
+           recs.some((r) => !r.sendErr &&
+                            (!r.ackStatus || r.ackStatus === 'sent' || r.ackStatus === 'queued'))) {
+      await sleep(1000);
+      await pollAcks();
+    }
+  }
 
   // ---- verdicts -----------------------------------------------------------
   for (const r of recs) {
@@ -175,14 +189,19 @@ async function runCommands(opts) {
     if (!p) { r.verdict = 'ABSENT'; r.why = `no reply within ${o.windowMs} ms`; continue; }
     if (p.replyId !== r.packetId) checks.push(`reply_id ${hex(p.replyId)} != cmd ${hex(r.packetId)}`);
     if (p.from_num !== o.targetNode) checks.push(`answered by ${p.from_num}, expected ${o.targetNode}`);
-    if (o.channel != null && p.channel != null && p.channel !== o.channel)
+    // A PKC DM carries channel 0 on the wire — the crypto MARKER, not a channel
+    // index (fw reply-in-kind, 2026-07-23) — so the channel assertion only
+    // applies to broadcast replies.
+    if (o.channel != null && p.channel != null && p.channel !== o.channel && !p.is_dm)
       checks.push(`channel ${p.channel}, expected ${o.channel}`);
     if (o.expectTransport === 'dm' && !p.is_dm) checks.push('expected DM, got BROADCAST');
     if (o.expectTransport === 'broadcast' && p.is_dm) checks.push('expected BROADCAST, got DM');
     // ACK assertion. no_ack_needed means we never ASKED for one (broadcast) — a FAIL
     // when an ack is required, not a pass.
-    if (o.expectAck === 'acked' && r.ackStatus !== 'acked')
-      checks.push(`ack status '${r.ackStatus || 'none'}', expected 'acked'`);
+    // mesh-gw's terminal happy state is 'delivered' (radio ACK received);
+    // 'acked' was the draft name and both must pass.
+    if (o.expectAck === 'acked' && r.ackStatus !== 'acked' && r.ackStatus !== 'delivered')
+      checks.push(`ack status '${r.ackStatus || 'none'}', expected acked/delivered`);
     if (checks.length) { r.verdict = 'WRONG'; r.why = checks.join('; '); }
     else if (p.late) { r.verdict = 'LATE'; r.why = `arrived after the ${o.windowMs} ms window`; }
     else r.verdict = 'OK';
