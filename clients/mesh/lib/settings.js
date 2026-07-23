@@ -15,7 +15,7 @@ const DEFAULTS = Object.freeze({
   timing:  { sendSpacingMs: 3000, replyTimeoutMs: 20000, wsMaxPayload: 0,
              chunkAnswerMs: 8000, idleMs: 240000, pushDeadlineMs: 900000,
              pushQuietMs: 15000 }, // post-stream quiet wait before PROGRESS_Q; must exceed device max inter-chunk gap (~9s)
-  retry:   { commands: false },
+  retry:   { commands: false, idempotent: 2, attemptTimeoutMs: 10000 }, // resend known-idempotent domain cmds; per-attempt reply wait
   // Directed PKC DM (to:num, channel 0) is the DEFAULT send; the private channel is the
   // fallback (num unknown / '*' / DM disabled). omitAddress keeps the legacy @<target>
   // text prefix (un-flashed firmware still requires it) — flip true, then remove, once

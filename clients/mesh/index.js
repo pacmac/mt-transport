@@ -57,12 +57,12 @@ class Mesh extends EventEmitter {
       gw: this.gw, gwId: this.gwId, channel: this.channel, protocol,
       timing: this.timing, model: this.model, cfg: this.cfg,
       log: require('./lib/log').log.child('images'),
-      command: (node, verb, args) => this.command(node, verb, args),
+      command: (node, verb, args) => this.command(node, verb, args, this._idem()),   // push stat etc. are idempotent
       send: (node, text) => this._sendRaw(node, text),   // fire-and-forget control via the DM path
     });
     this.images.emit = (type, payload) => this.emit(type, payload);
     this.config = new Config({
-      command: (node, verb, args) => this.command(node, verb, args),
+      command: (node, verb, args) => this.command(node, verb, args, this._idem()),   // config/chunk cfg/name are idempotent
       send: (node, text) => this._sendRaw(node, text),      // `sch` pages: fire-and-forget over the DM path
       log: require('./lib/log').log.child('config'),
       schemaTimeoutMs: this.cfg.timing && this.cfg.timing.chunkAnswerMs,
@@ -160,18 +160,23 @@ class Mesh extends EventEmitter {
     return this.gw.sendText(this.gwId, text, opts);
   }
 
+  // Reliability profile for KNOWN-idempotent commands: resend on timeout (safe to repeat).
+  // The raw command() below defaults to retries=0 — the escape hatch for reboot/wedge.
+  _idem() { const r = this.cfg.retry || {}; return { retries: r.idempotent != null ? r.idempotent : 0, timeoutMs: r.attemptTimeoutMs }; }
+
   // ---- commands (module owns grammar + timing + correlation) ----
-  async command(node, verb, args = []) {
+  // { retries, timeoutMs } destructured (NOT named `opts` — that is the send opts from _addressed).
+  async command(node, verb, args = [], { retries = 0, timeoutMs } = {}) {
     const a = Array.isArray(args) ? args : (args === '' || args == null ? [] : [args]);
     const { num, atToken } = await this._resolve(node);
     const body = `${verb}${a.length ? ' ' + a.join(' ') : ''}`;
     const { text, opts, key } = this._addressed(node, body, num, atToken);
     return this.timing.enqueue(
       () => this.gw.sendText(this.gwId, text, opts),
-      { match: (r) => r && typeof r === 'object', dedupKey: `${key}|${verb}` });
+      { match: (r) => r && typeof r === 'object', dedupKey: `${key}|${verb}`, retries, timeoutMs });
   }
-  async ping(node) { return this.command(node, 'ping'); }
-  async status(node, domain) { return this.command(node, 'status', domain ? [domain] : []); }
+  async ping(node) { return this.command(node, 'ping', [], this._idem()); }
+  async status(node, domain) { return this.command(node, 'status', domain ? [domain] : [], this._idem()); }
 
   // ---- images (hides chunk/push/timing) ----
   async listImages(node) { return this.images.list(node); }

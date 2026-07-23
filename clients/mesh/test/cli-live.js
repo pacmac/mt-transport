@@ -123,6 +123,25 @@ async function main() {
     ok(code === 'ECONFIG', 'connect throws ECONFIG without gatewayId');
   }
 
+  // idempotent retry: first send unanswered -> timeout -> resend -> reply resolves
+  {
+    const { m, g } = wire();
+    let sends = 0;
+    const orig = g.sendText.bind(g);
+    g.sendText = async (gwId, text, o) => { sends++; const r = await orig(gwId, text, o); if (sends === 2) g.emit({ kind: 'text', text: '{"type":"pong"}', from: '!b' }); return r; };
+    const reply = await m.command('b80f', 'ping', [], { retries: 1, timeoutMs: 80 });
+    ok(reply && reply.type === 'pong', 'retry: resend after timeout resolves');
+    ok(sends === 2, 'retry: exactly 2 sends (1 dropped + 1 answered)');
+  }
+  // no-retry: a single drop still rejects ETIMEOUT (raw command escape hatch)
+  {
+    const { m, g } = wire();
+    g.sendText = async () => ({ id: 1 }); // never replies
+    let code = null;
+    try { await m.command('b80f', 'ping', [], { retries: 0, timeoutMs: 60 }); } catch (e) { code = e.code; }
+    ok(code === 'ETIMEOUT', 'no-retry: single drop -> ETIMEOUT');
+  }
+
   console.log(`cli-live OK: ${pass} assertions passed`);
 }
 

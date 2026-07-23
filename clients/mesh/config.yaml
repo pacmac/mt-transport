@@ -24,7 +24,9 @@ timing:
   pushDeadlineMs: 900000
   pushQuietMs: 15000     # post-stream quiet wait before PROGRESS_Q; must exceed the device's max inter-chunk gap (~9s). actMs(4s) < quietMs(15s) < push idle(35s)
 retry:
-  commands: false        # non-idempotent; no blind retry
+  commands: false        # raw command() escape hatch: never blind-retry (reboot/wedge live here)
+  idempotent: 2          # resends for KNOWN-idempotent domain cmds (ping/status/config/image control)
+  attemptTimeoutMs: 10000 # per-attempt reply wait for those (device answers <10s or never)
 listen:
   autoFetchImages: true
   alerts: [motion, fault]
