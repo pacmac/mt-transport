@@ -142,6 +142,16 @@ async function main() {
     ok(code === 'ETIMEOUT', 'no-retry: single drop -> ETIMEOUT');
   }
 
+  // passthrough noReply: a by-another-route verb resolves {sent:true} on send (no text reply)
+  {
+    const { m, g } = wire();
+    const r = await m.command('b80f', 'debug');            // auto-detected no-reply
+    ok(r && r.sent === true, 'noReply: debug auto-resolves {sent:true} on send');
+    ok(g.sent.length === 1, 'noReply: one send, no reply wait');
+    const r2 = await m.command('b80f', 'cam', ['grab']);   // "verb subverb" no-reply
+    ok(r2 && r2.sent === true, 'noReply: "cam grab" auto-resolves');
+  }
+
   console.log(`cli-live OK: ${pass} assertions passed`);
 }
 

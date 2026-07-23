@@ -25,6 +25,11 @@ const VERBS = [
     run: (m, t) => m.getConfig(t) },
   { verb: 'config set',  target: true,  args: '<key> <value>', help: 'set device config (validated)',
     run: (m, t, a) => m.setConfig(t, { [a[0]]: a[1] }) },
+  { verb: 'cmd',         target: true,  args: '<verb> [args...]', help: 'send ANY device command raw (escape hatch)',
+    run: (m, t, a, flags) => {
+      if (!a.length) throw new errors.MeshError('cmd: needs a device verb', 'EUSAGE');
+      return m.command(t, a[0], a.slice(1), flags['no-reply'] ? { noReply: true } : {});
+    } },
   { verb: 'listen',      target: false, args: '[--serve] [--port N]', help: 'run as a daemon: hold model + autonomous image listener + event feed',
     daemon: true },
 ];
@@ -45,7 +50,7 @@ function usage() {
 // otherwise the first positional IS the target and the verb follows it.
 function parse(argv) {
   const flags = {}; const rest = [];
-  const BOOL = new Set(['json', 'serve', 'help']);
+  const BOOL = new Set(['json', 'serve', 'help', 'no-reply']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--') && BOOL.has(a.slice(2))) flags[a.slice(2)] = true;

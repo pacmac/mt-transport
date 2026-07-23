@@ -26,6 +26,10 @@ const VERSION = require('./package.json').version;
 const PORT_ALARM = 260; // JSON: debug, config, adverts
 const PORT_CHUNK = 261; // binary: chunk/push frames
 
+// Verbs that answer by ANOTHER route (a 260/binary frame), never a text reply — resolve
+// on send instead of waiting, else they always ETIMEOUT. Keyed by verb OR "verb subverb".
+const NO_REPLY = new Set(['debug', 'sch', 'cam grab', 'chunk pull', 'push pull']);
+
 class Mesh extends EventEmitter {
   // opts merge into config (defaults < config.yaml < env < opts). channel!=0.
   constructor(opts = {}) {
@@ -166,14 +170,16 @@ class Mesh extends EventEmitter {
 
   // ---- commands (module owns grammar + timing + correlation) ----
   // { retries, timeoutMs } destructured (NOT named `opts` — that is the send opts from _addressed).
-  async command(node, verb, args = [], { retries = 0, timeoutMs } = {}) {
+  async command(node, verb, args = [], { retries = 0, timeoutMs, noReply } = {}) {
     const a = Array.isArray(args) ? args : (args === '' || args == null ? [] : [args]);
     const { num, atToken } = await this._resolve(node);
     const body = `${verb}${a.length ? ' ' + a.join(' ') : ''}`;
     const { text, opts, key } = this._addressed(node, body, num, atToken);
+    // Explicit noReply wins; otherwise auto-detect the by-another-route verbs.
+    const nr = noReply != null ? noReply : (NO_REPLY.has(verb) || (a.length > 0 && NO_REPLY.has(`${verb} ${a[0]}`)));
     return this.timing.enqueue(
       () => this.gw.sendText(this.gwId, text, opts),
-      { match: (r) => r && typeof r === 'object', dedupKey: `${key}|${verb}`, retries, timeoutMs });
+      { match: (r) => r && typeof r === 'object', dedupKey: `${key}|${verb}`, retries, timeoutMs, noReply: !!nr });
   }
   async ping(node) { return this.command(node, 'ping', [], this._idem()); }
   async status(node, domain) { return this.command(node, 'status', domain ? [domain] : [], this._idem()); }
