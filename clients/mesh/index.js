@@ -18,6 +18,7 @@ const { Timing } = require('./lib/timing');
 const { Model } = require('./lib/model');
 const { Images } = require('./lib/images');
 const { Config } = require('./lib/config');
+const { Butler } = require('./lib/butler');
 const { Notifier } = require('./lib/notify');
 const { Daemon } = require('./lib/daemon');
 const log = require('./lib/log').log.child('mesh');
@@ -76,6 +77,18 @@ class Mesh extends EventEmitter {
       log: require('./lib/log').log.child('config'),
       schemaTimeoutMs: this.cfg.timing && this.cfg.timing.chunkAnswerMs,
     });
+    // Command butler: per-unit queue, delivered into the wake window ('heard'). deliver = the
+    // idempotent PKC-DM command path (one attempt per window; the butler owns cross-window retry).
+    this.butler = new Butler({
+      deliver: (unit, verb, args) => this.command(unit, verb, args, this._idem()),
+      store: this.images.store,
+      log: require('./lib/log').log.child('butler'),
+      cfg: this.cfg,
+    });
+    for (const ev of ['queued', 'acked', 'failed', 'expired', 'cancelled']) {
+      this.butler.on(ev, (e) => this.emit('command-' + ev, e));
+    }
+    this.on('heard', (e) => { this.butler.onHeard(e.from).catch((err) => log.debug('butler onHeard: %s', err && err.message)); });
     this.gw.onEvent((ev) => this._onEvent(ev));
     log.debug('connecting to gw %s (gwId %s, channel %d)', this.cfg.gw.host, this.gwId, this.channel);
     await this.gw.connect();
@@ -87,6 +100,11 @@ class Mesh extends EventEmitter {
 
   // Route a normalized gw event into replies (timing) and the model.
   _onEvent(ev) {
+    if (ev.kind === 'heard') {
+      // A unit transmitted → its wake window is open. Cue the butler (and surface for consumers).
+      this.emit('heard', { from: ev.from, portnum: ev.portnum, rssi: ev.rssi, snr: ev.snr });
+      return;
+    }
     if (ev.kind === 'text') {
       const reply = protocol.parseReply(ev.text);
       if (reply) { this.timing.onReply(reply); this.emit('reply', reply, ev.from); }
@@ -200,6 +218,18 @@ class Mesh extends EventEmitter {
   async grabImage(node, opts) { return this.images.grab(node, opts); }          // capture -> fetch: { pid, bytes, buf }
   async imageStats(node, pid) { return this.images.store.loadStats(node, pid); } // persisted per-pid transfer telemetry
   startImageListener() { return this.images.startListener(); }  // autonomous push catch
+
+  // ---- command butler (queue + deliver into the wake window) ----
+  // Canonicalise a target to the node-id key the queue + 'heard' both use.
+  async _unitKey(target) {
+    const { num } = await this._resolve(target);
+    return num != null ? '!' + (num >>> 0).toString(16) : String(target);
+  }
+  async queueCommand(target, verb, args = [], opts = {}) {
+    return this.butler.enqueue(await this._unitKey(target), verb, args, opts);
+  }
+  async queueList(target) { return this.butler.list(target ? await this._unitKey(target) : undefined); }
+  queueCancel(id) { return this.butler.cancel(id); }
 
   // ---- daemon (long-running: model + autonomous image listener + domain feed) ----
   // Requires connect() first (cfg set). Returns the started Daemon.

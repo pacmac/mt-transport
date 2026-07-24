@@ -111,11 +111,35 @@ class Daemon {
     res.end(body);
   }
 
+  _body(req) {
+    return new Promise((resolve) => {
+      let d = '';
+      req.on('data', (c) => { d += c; if (d.length > 1e6) req.destroy(); });
+      req.on('end', () => { try { resolve(d ? JSON.parse(d) : {}); } catch { resolve(null); } });
+      req.on('error', () => resolve(null));
+    });
+  }
+
   async _route(req, res) {
-    if (req.method !== 'GET') return this._send(res, 405, { error: 'method not allowed' });
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
     try {
+      // Command butler — POST enqueue / GET ledger / DELETE cancel (the only write endpoints).
+      if (p === '/queue' && req.method === 'POST') {
+        const b = await this._body(req);
+        if (!b || !b.unit || !b.verb) return this._send(res, 400, { error: 'need {unit, verb, args?, ttlMs?, maxAttempts?}' });
+        const entry = await this.mesh.queueCommand(b.unit, b.verb, b.args || [], { ttlMs: b.ttlMs, maxAttempts: b.maxAttempts });
+        return this._send(res, 200, entry);
+      }
+      if (p === '/queue' && req.method === 'GET') return this._send(res, 200, await this.mesh.queueList());
+      const qm = p.match(/^\/queue\/(.+)$/);
+      if (qm && req.method === 'GET') return this._send(res, 200, await this.mesh.queueList(decodeURIComponent(qm[1])));
+      if (qm && req.method === 'DELETE') {
+        const c = this.mesh.queueCancel(decodeURIComponent(qm[1]));
+        return c ? this._send(res, 200, c) : this._send(res, 404, { error: 'not pending / unknown id' });
+      }
+
+      if (req.method !== 'GET') return this._send(res, 405, { error: 'method not allowed' });
       if (p === '/health') {
         return this._send(res, 200, {
           ok: true, uptimeMs: Date.now() - this._startedAt,

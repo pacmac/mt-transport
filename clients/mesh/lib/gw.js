@@ -60,6 +60,12 @@ class Gateway {
         log.debug('snapshot: %d devices', Array.isArray(e.devices) ? e.devices.length : 0);
         return;
       }
+      // 'heard' fires on EVERY over-air packet (the butler's window cue), in addition to any
+      // typed event — so a unit's heartbeat/wake TX is seen even though we decode none of it.
+      const heard = this._heard(e);
+      if (heard) for (const h of this.handlers) {
+        try { h(heard); } catch (err) { log.warn('event handler threw', err); }
+      }
       const norm = this._normalize(e);
       if (norm) for (const h of this.handlers) {
         // A throwing handler must not kill the stream — log and carry on.
@@ -119,6 +125,23 @@ class Gateway {
       return { kind: 'status', packetId: e.packet_id, status: e.status, raw: e };
     }
     return null; // everything else is stock Meshtastic — not our concern here
+  }
+
+  // A unit transmitting means its ~10 s RX window is open (the butler's cue). mesh-gw emits one
+  // 'packet' event per received packet (alongside any decoded typed event), so this is the
+  // universal per-packet signal. Kept dumb: sender + link stats, no payload decode.
+  _heard(e) {
+    if (e.type !== 'packet') return null;
+    const pkt = (e.data && e.data.packet) || {};
+    // KEY off packet.from — the ORIGINAL sender. e.node_id is always the relaying/BLE-local node
+    // (the gateway), so it would collapse every unit onto one key. Verified live 2026-07-24.
+    if (pkt.from == null) return null;
+    const dec = pkt.decoded || {};
+    return {
+      kind: 'heard', from: '!' + (pkt.from >>> 0).toString(16), portnum: dec.portnum || null,
+      rssi: pkt.rx_rssi != null ? pkt.rx_rssi : null,
+      snr: pkt.rx_snr != null ? pkt.rx_snr : null,
+    };
   }
 
   // Send a text message via the gateway. opts: {channel, to, replyId}.

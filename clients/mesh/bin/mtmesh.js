@@ -47,6 +47,27 @@ const VERBS = [
       if (flags['no-reply']) opts.noReply = true;
       return m.command(t, a[0], a.slice(1), opts);
     } },
+  { verb: 'queue',       target: true,  args: '<verb> [args...] | --list | cancel <id>', help: 'queue a command for delivery in the unit\'s next wake window (butler)',
+    run: async (m, t, a, flags) => {
+      // The butler lives in the running daemon — intake goes to its HTTP /queue, never a
+      // throwaway CLI instance. (queueCommand/List/Cancel on Mesh are the daemon's handlers.)
+      const d = m.cfg.daemon || {};
+      const base = `http://${d.host || '127.0.0.1'}:${d.port || 8787}`;
+      const call = async (path, init) => {
+        let r;
+        try { r = await fetch(base + path, init); }
+        catch { throw new errors.MeshError(`queue: no daemon at ${base} (start \`mtmesh listen\`)`, 'ENODAEMON'); }
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new errors.MeshError(`queue: ${body.error || r.status}`, 'EQUEUE');
+        return body;
+      };
+      if (flags.list) return call(`/queue/${encodeURIComponent(t)}`);
+      if (a[0] === 'cancel' && a[1]) return call(`/queue/${encodeURIComponent(a[1])}`, { method: 'DELETE' });
+      if (!a.length) throw new errors.MeshError('queue: needs a device verb (or --list / cancel <id>)', 'EUSAGE');
+      const b = { unit: t, verb: a[0], args: a.slice(1) };
+      if (flags.ttl) b.ttlMs = Number(flags.ttl) * 1000;
+      return call('/queue', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
+    } },
   { verb: 'listen',      target: false, args: '[--serve] [--port N]', help: 'run as a daemon: hold model + autonomous image listener + event feed',
     daemon: true },
 ];
@@ -67,7 +88,7 @@ function usage() {
 // otherwise the first positional IS the target and the verb follows it.
 function parse(argv) {
   const flags = {}; const rest = [];
-  const BOOL = new Set(['json', 'serve', 'help', 'no-reply']);
+  const BOOL = new Set(['json', 'serve', 'help', 'no-reply', 'list']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--') && BOOL.has(a.slice(2))) flags[a.slice(2)] = true;

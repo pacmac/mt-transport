@@ -79,6 +79,31 @@ class PayloadStore {
     catch { return null; }
   }
 
+  // Command-butler queue — persistent per-unit command ledger. Survives restart, so a command
+  // queued for a unit that wakes in hours is still there. One `queue.json` per unit dir.
+  _queuePath(node) {
+    return path.join(this.dir, String(node).replace(/[^\w!-]/g, '_'), 'queue.json');
+  }
+  saveQueue(node, entries) {
+    const p = this._queuePath(node);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(entries, null, 2));
+    return p;
+  }
+  loadQueue(node) {
+    try { return JSON.parse(fs.readFileSync(this._queuePath(node), 'utf8')); }
+    catch { return []; }
+  }
+  // Units with a persisted queue — the butler loads these on startup. Dir names ARE the unit
+  // keys (node ids like !987ab80f survive the [\w!-] sanitiser unchanged).
+  listQueuedUnits() {
+    try {
+      return fs.readdirSync(this.dir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && fs.existsSync(path.join(this.dir, d.name, 'queue.json')))
+        .map((d) => d.name);
+    } catch { return []; }
+  }
+
   // Retention is NOT implemented. Left explicit rather than silently absent.
   prune() { throw new Error('retention policy not implemented — see specs/mesh-images.md §7'); }
 }
