@@ -30,6 +30,8 @@ const FIELDS = [
   ['chunk.gap', 'n', 'Chunk gap ms', 3000, 1, 0, 60000],
   ['tele.chg', 'b', 'Telem onchange', 1, 1],
   ['tele.ka', 'n', 'Telem keepalive', 360, 1, 1, 1440],
+  ['agc.on', 'b', 'AGC reset', 1, 1],
+  ['agc.sec', 'n', 'AGC reset s', 60, 1, 5, 3600],
   ['txp', 'n', 'TX power', 22, 0],   // read-only, unbounded
 ];
 const PER_PAGE = 3;
@@ -38,7 +40,7 @@ const pageFrame = (p) => ({ t: 'sch', v: 1, p, n: NPAGES, f: [HEADER, ...FIELDS.
 
 // A stub device with mutable state + call counters.
 function makeDevice() {
-  const state = { hop: 1, gap: 3000 };
+  const state = { hop: 1, gap: 3000, on: 1, sec: 60 };
   const counts = { command: 0, send: 0, chunkWrites: 0 };
   const cfg = new Config({
     log: { debug() {}, info() {}, warn() {} },
@@ -57,6 +59,11 @@ function makeDevice() {
         state[verb] = args[0];
         return { type: verb, name: args[0], was, ok: true };
       }
+      if (verb === 'agc') {                                   // agc [<on> [<sec>]] sets both, reports both
+        if (args.length === 0) return { type: 'agc', on: state.on, sec: state.sec };
+        state.on = Number(args[0]) ? 1 : 0; state.sec = Number(args[1]);
+        return { type: 'agc', on: state.on, sec: state.sec };
+      }
       return {};
     },
     send: async (node, text) => {
@@ -74,7 +81,7 @@ function makeDevice() {
   {
     const { cfg, counts } = makeDevice();
     const s = await cfg.schema('b80f');
-    ok(s.fields.length === 18, `schema: 18 fields (got ${s.fields.length})`);
+    ok(s.fields.length === 20, `schema: 20 fields (got ${s.fields.length})`);
     const gap = s.fields.find((f) => f.id === 'chunk.gap');
     ok(gap && gap.ty === 'n' && gap.min === 0 && gap.max === 60000 && gap.writable, 'schema: chunk.gap bounds 0..60000, writable');
     const txp = s.fields.find((f) => f.id === 'txp');
@@ -129,7 +136,7 @@ function makeDevice() {
 
   // ---- 6. schema unreachable -> set() falls back to built-in bounds ----------
   {
-    const state = { hop: 1, gap: 3000 };
+    const state = { hop: 1, gap: 3000, on: 1, sec: 60 };
     const counts = { chunkWrites: 0 };
     const cfg = new Config({
       log: { debug() {}, info() {}, warn() {} },
@@ -139,6 +146,11 @@ function makeDevice() {
           if (args.length === 1) return { type: 'chunkcfg', hop: state.hop, gap: state.gap };
           counts.chunkWrites++; state.hop = Number(args[1]); state.gap = Number(args[2]);
           return { type: 'chunkcfg', hop: state.hop, gap: state.gap };
+        }
+        if (verb === 'agc') {
+          if (args.length === 0) return { type: 'agc', on: state.on, sec: state.sec };
+          state.on = Number(args[0]) ? 1 : 0; state.sec = Number(args[1]);
+          return { type: 'agc', on: state.on, sec: state.sec };
         }
         return {};
       },
@@ -152,6 +164,26 @@ function makeDevice() {
     let ef = null;
     try { await cfg.set('b80f', { 'det.n': 5 }); } catch (e) { ef = e.code; }
     ok(ef === 'EFIELD', 'fallback: a non-mapped field without schema -> EFIELD (honest)');
+    // agc.* must ALSO work on the fallback path — the schema pull is lossy in the field.
+    const ra = await cfg.set('b80f', { 'agc.sec': 30 });
+    ok(ra.confirmed && state.sec === 30 && state.on === 1, 'fallback: agc.sec set works without schema, on preserved');
+    let ac = null;
+    try { await cfg.set('b80f', { 'agc.sec': 4 }); } catch (e) { ac = e.code; }
+    ok(ac === 'ERANGE', 'fallback: agc.sec 4 < 5 -> ERANGE');
+  }
+
+  // ---- 8. set agc.on/agc.sec via the shared `agc` verb (sibling preserved) -----
+  {
+    const { cfg, state } = makeDevice();
+    const r = await cfg.set('b80f', { 'agc.sec': 30 });
+    ok(r.confirmed && r.set['agc.sec'] === 30 && state.sec === 30 && state.on === 1, 'agc: set sec -> confirmed, on preserved');
+    const r2 = await cfg.set('b80f', { 'agc.on': 0 });
+    ok(r2.confirmed && state.on === 0 && state.sec === 30, 'agc: set on=0, sec carried (sibling preserved)');
+    const r3 = await cfg.set('b80f', { 'agc.on': '1' });     // bool coercion
+    ok(r3.confirmed && state.on === 1, 'agc: on="1" coerced to 1');
+    let c = null;
+    try { await cfg.set('b80f', { 'agc.sec': 4 }); } catch (e) { c = e.code; }
+    ok(c === 'ERANGE', 'agc: sec 4 < 5 -> ERANGE (no airtime)');
   }
 
   // ---- 7. TEXT set (name/lname): confirm from the write reply + length bounds ----

@@ -26,6 +26,14 @@ const COMMAND_MAP = {
                  confirm: (r, v) => !!(r && Number(r.hop) === v) },
   'name':  { writeVerb: 'name',  write: (cur, v) => [v], confirm: (r, v) => !!(r && r.ok && r.name === v) },
   'lname': { writeVerb: 'lname', write: (cur, v) => [v], confirm: (r, v) => !!(r && r.ok && r.name === v) },
+  // agc [<on> [<sec>]] sets BOTH on+sec and replies {type:'agc',on,sec,agcr} — same shape as
+  // chunk cfg (hop+gap), so each write carries the unchanged sibling read from bare `agc`.
+  'agc.on':  { needsCurrent: true, readVerb: 'agc', readArgs: [], writeVerb: 'agc',
+               write: (cur, v) => [String(v), String(cur.sec)],
+               confirm: (r, v) => !!(r && Number(r.on) === v) },
+  'agc.sec': { needsCurrent: true, readVerb: 'agc', readArgs: [], writeVerb: 'agc',
+               write: (cur, v) => [String(cur.on), String(v)],
+               confirm: (r, v) => !!(r && Number(r.sec) === v) },
 };
 
 // Writable fields with no device read command — surfaced by get() as `unread`,
@@ -41,6 +49,8 @@ const FALLBACK_FIELDS = {
   'chunk.hop': { id: 'chunk.hop', ty: 'n', label: 'Chunk hops', writable: true, min: 0, max: 7, bounded: true },
   'name':  { id: 'name',  ty: 't', label: 'Short name', writable: true, min: 1, max: 4,  bounded: true }, // mn/mx are LENGTHS
   'lname': { id: 'lname', ty: 't', label: 'Long name',  writable: true, min: 1, max: 30, bounded: true }, // device validateName caps 24; confirm catches over-cap
+  'agc.on':  { id: 'agc.on',  ty: 'b', label: 'AGC reset',   writable: true },
+  'agc.sec': { id: 'agc.sec', ty: 'n', label: 'AGC reset s', writable: true, min: 5, max: 3600, bounded: true },
 };
 
 // One ragged schema row -> a field descriptor. Rows (from fmtField in the firmware):
