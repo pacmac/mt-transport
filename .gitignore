@@ -7,6 +7,9 @@
 # private-project task specs mirrored for mcpp attachment — canonical copies live in pac-garage-alarm
 specs/garage-fw-*.md
 specs/trial-*.md
+# EXCEPTION: this one is canonical HERE (the trial-logger Node port lives in clients/trial-logger),
+# not a mirror — so it is tracked despite the trial-* glob.
+!specs/trial-logger-node.md
 
 # Playwright/browser capture artefacts — never commit
 .playwright-mcp/

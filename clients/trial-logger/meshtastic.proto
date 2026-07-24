@@ -1,0 +1,28 @@
+// Minimal subset of the meshtastic protobufs — ONLY the fields trial-logger decodes.
+// Field numbers verified against the real telemetry.proto / mesh.proto (mt-radar). Unlisted
+// variants/fields on the wire are skipped as unknown by protobufjs (matches the Python decode).
+syntax = "proto3";
+
+message DeviceMetrics {
+  optional uint32 battery_level  = 1;
+  optional float  voltage        = 2;
+  optional uint32 uptime_seconds = 5;
+}
+
+message EnvironmentMetrics {
+  optional float temperature       = 1;
+  optional float relative_humidity = 2;
+}
+
+message Telemetry {
+  fixed32 time = 1;
+  oneof variant {
+    DeviceMetrics      device_metrics      = 2;
+    EnvironmentMetrics environment_metrics = 3;
+  }
+}
+
+message User {
+  string id        = 1;
+  string long_name = 2;
+}

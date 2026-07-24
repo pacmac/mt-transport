@@ -1,0 +1,12 @@
+{
+  "name": "@pac/trial-logger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Whole-mesh packet recorder — mesh-gw /events -> daily CSV + missed-heartbeat alerts. Node port of trial_logger.py; runs under PM2.",
+  "main": "trial-logger.js",
+  "scripts": { "start": "node trial-logger.js" },
+  "dependencies": {
+    "ws": "^8.0.0",
+    "protobufjs": "^7.2.0"
+  }
+}
