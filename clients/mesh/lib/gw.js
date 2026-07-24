@@ -100,13 +100,22 @@ class Gateway {
 
   // gw stays dumb: it maps mesh-gw envelopes to a small normalized shape and
   // leaves interpretation (protocol/model) to the layers above.
+  // The ORIGINAL sender's node-id ('!'+hex). mesh-gw's node_id is the RELAYING gateway on a
+  // multi-hop packet, so from_num (the packet's real origin) is authoritative — matches _heard,
+  // _unitKey and the roster. Verified live: an autonomous image push was mis-adopted under the
+  // gateway (control/repair went to the wrong node, the transfer never completed).
+  _from(e) {
+    if (e.from_num != null) return '!' + (e.from_num >>> 0).toString(16);
+    return e.node_id || null;
+  }
+
   _normalize(e) {
     if (e.type === 'private_app') {
       return {
         kind: 'app',
         portnum: e.portnum,
         payload: Buffer.from(e.payload_b64 || '', 'base64'),
-        from: e.node_id || (e.from_num != null ? String(e.from_num) : null),
+        from: this._from(e),
         raw: e,
       };
     }
@@ -114,7 +123,7 @@ class Gateway {
       return {
         kind: 'text',
         text: e.data && e.data.text,
-        from: e.node_id || (e.from_num != null ? String(e.from_num) : null),
+        from: this._from(e),
         channel: e.channel,
         packetId: e.packet_id,
         replyId: (e.data && e.data.reply_id) != null ? e.data.reply_id : null,
