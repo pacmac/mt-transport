@@ -212,12 +212,17 @@ public:
     uint32_t lastPacketId() const { return _lastId; }
     uint8_t  channelHash() const { return _hash; }
 
+    // Region freq (MHz), stored in begin(). The firmware's ported resetAGC() needs it for
+    // calibrateImage(); the firmware owns the Module, so the AGC reset lives THERE (see
+    // specs/agc-sensitivity-fix.md), and this transport only re-arms RX for it via resumeRx().
+    float freqMHz() const { return _freqMHz; }
+    // Re-arm RX (DIO1 action + startReceive) after the firmware's resetAGC() poked the radio
+    // directly. The lib owns the ISR + _rxActive, so re-arming MUST come back through here.
+    bool resumeRx();
+
     // Times a transmit was deferred because CAD heard LoRa activity —
     // real-world contention data for the app to log.
     uint32_t csmaDeferrals() const { return _csmaDeferrals; }
-    // CUMULATIVE count of periodic AGC resets performed (see resetAGC). Surfaced in the
-    // DEBUG frame so the reset's effect on csmaDeferrals is verifiable before/after.
-    uint32_t agcResets() const { return _agcResets; }
 
     // Consecutive RADIO-LEVEL transmit failures; cleared by the first success.
     // Encode/size/crypto rejections return before the transmit path is reached,
@@ -344,8 +349,7 @@ private:
     uint8_t  _txHead = 0, _txCount = 0;
     TxState  _txState = TX_IDLE;
     uint32_t _txStateMs = 0;          // when the current SCANNING/SENDING began (timeout safety)
-    float    _freqMHz = 0.0f;         // stored from region in begin(), for the periodic calibrateImage()
-    uint32_t _lastAgcResetMs = 0;     // millis() of the last periodic AGC reset
+    float    _freqMHz = 0.0f;         // stored from region in begin(); exposed via freqMHz() for the firmware's resetAGC()
 
     // Decoded RX packets service() has pulled off the radio, waiting for poll().
     static const uint8_t RXQ_N = 4;
@@ -355,7 +359,6 @@ private:
     uint64_t _seen[8] = {0};      // (from<<32|id) dedupe ring
     uint8_t  _seenIdx = 0;
     uint32_t _csmaDeferrals = 0;
-    uint32_t _agcResets = 0;          // cumulative; never reset
     uint32_t _txFailStreak = 0;
     uint32_t _txDropped = 0;
     uint32_t _rxDroppedByTx = 0;
@@ -381,10 +384,6 @@ private:
     bool pushRx(const RxPacket &p);
     bool enqueueFrame(const uint8_t *frame, size_t len); // copy into the TX ring
     void serviceAck();            // v2: retransmit the pending want_ack frame on timeout
-
-    static constexpr uint32_t AGC_RESET_INTERVAL_MS = 60000; // upstream cadence
-    void maybeResetAGC();         // per service(): fires resetAGC() when idle AND interval elapsed
-    void resetAGC();              // standby -> CALIBRATE_ALL -> calibrateImage -> re-apply gain -> startReceive
 
     // Shared build+encrypt+queue path for send() and sendPki(); `usePki` selects the
     // PKC route (channel 0, X25519/CCM) over the channel-PSK route (channel hash, CTR).

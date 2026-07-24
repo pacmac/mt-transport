@@ -54,13 +54,11 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
     // list, so boosted gain survives warm-start from sleep.
     radio.setRxBoostedGainMode(true);
     // NOT DONE HERE: the undocumented 0x8B5 bit-0 RX-sensitivity patch that upstream
-    // also sets in SX126xInterface::init(). It cannot be applied from outside
-    // RadioLib — SX126x::writeRegister/readRegister/getMod() are all PROTECTED — so
-    // it needs an API decision (subclass SX1262, or a RadioLib-side accessor) that
-    // reaches beyond this file. Tracked on adopt-meshtastic-csma step 7.
-    // Note for whoever does it: upstream re-applies it every AGC_RESET_INTERVAL_MS
-    // (60 s) because its resetAGC() runs CALIBRATE_ALL, which CLEARS the bit. We run
-    // no periodic CALIBRATE_ALL, so we need no timer — unless one is ever added.
+    // also sets in SX126xInterface::init(). It cannot be applied from THIS file — the
+    // transport holds an SX1262& and SX126x::getMod()/writeRegister() are PROTECTED. The
+    // FIRMWARE owns the Module (g_radioMod, public SPIsetRegValue), so it applies the patch
+    // at boot/wake AND re-applies it inside its ported resetAGC() after each CALIBRATE_ALL
+    // clears the bit — the periodic reset that lives there now. See specs/agc-sensitivity-fix.md.
 
     // Slot time for the contention model (MT computeSlotTimeMsec, SX126x form):
     // ~2.5 CAD symbols + propagation/turnaround/MAC (0.2+0.4+7 ms). symbolTime =
@@ -77,8 +75,7 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
     radio.setDio1Action(_onDio1Rx);
     if (radio.startReceive() == RADIOLIB_ERR_NONE)
         _rxActive = true;
-    _freqMHz = region.freqMHz;     // for the periodic calibrateImage()
-    _lastAgcResetMs = millis();    // start the AGC-reset clock at boot
+    _freqMHz = region.freqMHz;     // exposed via freqMHz() for the firmware's resetAGC()
     return true;
 }
 
@@ -581,40 +578,25 @@ void MeshtasticTransport::handleRxDone()
 // tells us something happened; getIrqFlags tells us WHAT), then advances the TX
 // state machine. RX-done → decode+queue; TX-done → drop the sent frame + next;
 // CAD-done → free: send, busy: listen + reschedule. Called every loop() pass.
-// Fire the periodic AGC reset ONLY when the radio is idle (never mid-TX or with a frame
-// queued — a standby then would corrupt the transmit). On a busy unit the reset simply
-// waits for the next idle gap; the always-awake node has gaps every heartbeat.
-void MeshtasticTransport::maybeResetAGC()
+//
+// The periodic AGC reset is NOT here. It ran CALIBRATE_ALL, which clears the 0x8B5
+// RX-sensitivity bit — and only the FIRMWARE owns the Module needed to re-apply that bit,
+// so a home-grown reset here silently dropped it ~60s after boot (the whack-a-mole). The
+// reset now lives in the firmware as a faithful port of upstream SX126xInterface::resetAGC(),
+// which re-arms RX through resumeRx() below. See specs/agc-sensitivity-fix.md.
+bool MeshtasticTransport::resumeRx()
 {
-    if (busy()) return;                                              // TX in flight or queued
-    if ((uint32_t)(millis() - _lastAgcResetMs) < AGC_RESET_INTERVAL_MS) return;
-    resetAGC();
-}
-
-// The SX1262 loses RX boost ~60s after boot; only CALIBRATE_ALL resets the AGC (a plain
-// standby->startReceive does not — upstream SX126xInterface.cpp:451-514). Briefly (~ms)
-// leaves RX to calibrate: a frame arriving in that window is lost, accepted every 60s as
-// the cost of never going permanently deaf. calibrate() CLEARS image cal + DIO cfg, so
-// re-apply calibrateImage / DIO2 RF switch / boosted gain / DIO1 action, then re-arm RX.
-void MeshtasticTransport::resetAGC()
-{
-    _radio->standby(RADIOLIB_SX126X_STANDBY_RC, true);
-    _radio->calibrate(RADIOLIB_SX126X_CALIBRATE_ALL);
-    _radio->calibrateImage(_freqMHz);
-    _radio->setDio2AsRfSwitch(true);
-    _radio->setRxBoostedGainMode(true);
+    if (!_radio)
+        return false;
     _radio->setDio1Action(_onDio1Rx);
     _rxActive = (_radio->startReceive() == RADIOLIB_ERR_NONE);
-    _agcResets++;
-    _lastAgcResetMs = millis();
+    return _rxActive;
 }
 
 void MeshtasticTransport::service()
 {
     if (!_radio)
         return;
-
-    maybeResetAGC();   // periodic AGC reset (only when idle; see resetAGC)
 
     if (_radioEvent) {
         _radioEvent = false;
