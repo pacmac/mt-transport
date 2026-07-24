@@ -75,11 +75,14 @@ const chunkBytes = (s) => payload.subarray(s * CH, Math.min((s + 1) * CH, payloa
 }
 
 // ---- device simulator + Images factory --------------------------------------
-function makeDevice(ref, { drop = new Set(), repairOnly = false, from = '!8cee336b', pid = 1 } = {}) {
+function makeDevice(ref, { drop = new Set(), corrupt = new Set(), repairOnly = false, from = '!8cee336b', pid = 1 } = {}) {
   const deliver = (frame) => setTimeout(() => { if (ref.obj) ref.obj.onFrame(frame, from); }, 0);
   const streamAll = () => {
-    deliver(P.encodeManifest(pid, 2, payload.length, COUNT, CRC));
-    for (let s = 0; s < COUNT; s++) if (!drop.has(s)) deliver(P.encodeChunk(pid, s, chunkBytes(s)));
+    deliver(P.encodeManifest(pid, 2, payload.length, COUNT, CRC));   // manifest CRC = the CORRECT crc
+    for (let s = 0; s < COUNT; s++) if (!drop.has(s)) {
+      const data = corrupt.has(s) ? Buffer.from(chunkBytes(s).map((b) => b ^ 0xFF)) : chunkBytes(s);
+      deliver(P.encodeChunk(pid, s, data));                          // corrupt = all chunks arrive, one is garbage
+    }
   };
   return {
     pid, from,
@@ -181,7 +184,32 @@ async function testGrab() {
   ok(r.bytes === 8 && r.buf.equals(Buffer.from('JPEGDATA')), 'grab: returns { pid, bytes, buf }');
 }
 
+// ---- 8. CRC-fail clears the poisoned partial (a complete-but-corrupt set) --------
+async function testCrcClear() {
+  const ref = {};
+  const tmp = mkTmp();
+  const dev = makeDevice(ref, { corrupt: new Set([2]) });   // all chunks arrive; chunk 2 is garbage -> whole-image CRC fails
+  const images = makeImages(dev, tmp);
+  ref.obj = images;
+  let code = null;
+  try { await images.get('336b', 1); } catch (e) { code = e.code; }
+  ok(code === 'EXFER', 'crc-clear: corrupt complete set -> EXFER');
+  ok(images.store.loadPartial('336b', 1) === null, 'crc-clear: the corrupt partial was CLEARED (no resume poison)');
+}
+
+// ---- 9. incompleteness is NEVER flagged corrupt (so a partial is never wrongly cleared) --
+async function testKeepOnIncomplete() {
+  const rx = new PushReceiver(1, { idleMs: 100, actMs: 100, quietMs: 100 });
+  rx.onFrame(P.encodeManifest(1, 2, payload.length, COUNT, CRC), 1000);
+  for (let s = 0; s < COUNT; s++) if (s !== 2) rx.onFrame(P.encodeChunk(1, s, chunkBytes(s)), 1000); // chunk 2 missing
+  rx.tick(1500); rx.tick(2000);
+  // `corrupt` is set ONLY when a COMPLETE set fails CRC — a missing chunk must never set it,
+  // so _drive's `if (rx.corrupt)` guard keeps the partial for resume.
+  ok(!rx.corrupt && rx.missing().length > 0, 'keep: missing-chunk (incomplete) is never flagged corrupt');
+}
+
 Promise.resolve()
   .then(testGet).then(testAutonomous).then(testResume).then(testGrab)
+  .then(testCrcClear).then(testKeepOnIncomplete)
   .then(() => console.log(`images OK: ${pass} assertions passed`))
   .catch((e) => { console.error('images FAILED:', e && e.stack || e); process.exit(1); });

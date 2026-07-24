@@ -69,6 +69,7 @@ class PushReceiver {
     this.lastTxMs = -Infinity;   // last time we asked for anything
     this.awaitingProgress = false;
     this.failed = null;
+    this.corrupt = false;   // set when a COMPLETE set fails the whole-image CRC (unrecoverable by resume)
 
     this.stats = { chunkFrames: 0, dupes: 0, manifests: 0, progressReplies: 0,
                    startsSent: 0, queriesSent: 0, repairsSent: 0, repairIds: 0,
@@ -181,7 +182,7 @@ class PushReceiver {
     // We have everything. Only WE can assert this — say so and release the buffer.
     if (miss.length === 0) {
       const asm = this.assemble();
-      if (!asm) { this.failed = 'CRC mismatch on a complete set'; return null; }
+      if (!asm) { this.failed = 'CRC mismatch on a complete set'; this.corrupt = true; return null; }
       this.state = ST.DONE;
       return p.encodeComplete(this.pid, this.manifest.crc);
     }

@@ -152,10 +152,16 @@ class Images {
       if (rx.received !== lastPersistCount) { lastPersistCount = rx.received; this._persistPartial(node, rx); }
       if (onProgress) { try { onProgress({ received: rx.received, count: rx.count }); } catch { /* never break the transfer */ } }
 
-      if (rx.failed) throw new MeshError(`image ${pid}: ${rx.failed}`, 'EXFER');
+      if (rx.failed) {
+        // Corrupt (CRC-mismatch on a complete set): the persisted partial holds bad bytes
+        // that resume can't recover, so drop it and force a fresh re-fetch. Incompleteness
+        // (stuck / unresponsive) KEEPS the partial — resume is how a marginal link converges.
+        if (rx.corrupt) this.store.clearPartial(node, pid);
+        throw new MeshError(`image ${pid}: ${rx.failed}`, 'EXFER');
+      }
       if (rx.done) {
         const buf = rx.assemble();
-        if (!buf) throw new MeshError(`image ${pid}: complete but CRC failed`, 'ECRC');
+        if (!buf) { this.store.clearPartial(node, pid); throw new MeshError(`image ${pid}: complete but CRC failed`, 'ECRC'); }
         this.store.clearPartial(node, pid);
         const path = this.store.save(buf, { pid, ptype: PT_IMAGE, node });
         this.log.info('image saved: pid %d (%d bytes) -> %s', pid, buf.length, path);
