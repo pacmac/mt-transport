@@ -71,14 +71,21 @@ class Timing {
     return promise;
   }
 
-  // Correlate a reply to the in-flight command (positional). Returns whether it
-  // was consumed.
-  onReply(replyObj) {
+  // Correlate a reply to the in-flight command. EXACT when the device threaded a
+  // reply_id (sendReply(msg, rx.id)) AND we captured our sent packet id — then a reply
+  // carrying a DIFFERENT reply_id is ignored (the delayed/overlapping-reply cross the
+  // butler kept hitting). Falls back to the POSITIONAL match when either is absent
+  // (broadcasts / untraceable replies). Returns whether it was consumed.
+  onReply(replyObj, replyId = null) {
     if (!this.inFlight) return false;
-    const m = this.inFlight.opts.match;
-    if (m && !m(replyObj)) return false;
-    clearTimeout(this.inFlight.timer);
     const e = this.inFlight;
+    if (e.sentId != null && replyId != null) {
+      if (Number(replyId) !== e.sentId) return false;   // a different command's reply
+    } else {
+      const m = e.opts.match;
+      if (m && !m(replyObj)) return false;
+    }
+    clearTimeout(e.timer);
     this.inFlight = null;
     log.trace('reply matched');
     e.resolve(replyObj);
@@ -104,14 +111,18 @@ class Timing {
     this.inFlight = e;
     this.lastSentAt = Date.now();
     log.trace('send', { priority: e.priority, noReply: !!e.opts.noReply });
+    let res;
     try {
-      await e.thunk();
+      res = await e.thunk();
     } catch (err) {
       log.warn('send threw', err);
       this.inFlight = null;
       e.reject(err);
       return this._pump();
     }
+    // The sent packet id (gw.sendText -> {id}); the device threads its reply_id to it,
+    // so onReply can correlate EXACTLY instead of positionally.
+    e.sentId = (res && res.id != null) ? Number(res.id) : null;
 
     // Some commands answer by another route entirely — a chunk pull replies with
     // binary chunks on port 261, never with text. Resolve on send for those.

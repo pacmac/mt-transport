@@ -107,7 +107,7 @@ class Mesh extends EventEmitter {
     }
     if (ev.kind === 'text') {
       const reply = protocol.parseReply(ev.text);
-      if (reply) { this.timing.onReply(reply); this.emit('reply', reply, ev.from); }
+      if (reply) { this.timing.onReply(reply, ev.replyId); this.emit('reply', reply, ev.from); }
       return;
     }
     if (ev.kind === 'app' && ev.portnum === PORT_ALARM) {

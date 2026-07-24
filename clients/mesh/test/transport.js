@@ -120,6 +120,28 @@ async function timingTests() {
     t.onReply({ ok: true });
     await p1;
   }
+
+  // E) reply_id correlation: a crossing reply (wrong reply_id) is IGNORED; the match resolves
+  {
+    const t = new Timing({ sendSpacingMs: 0, replyTimeoutMs: 1000 });
+    const p = t.enqueue(async () => ({ id: 111 }), { match: () => true });
+    await tick(0);                                    // let _pump send + capture sentId
+    ok(t.inFlight && t.inFlight.sentId === 111, 'reply_id: sentId captured from thunk {id}');
+    ok(t.onReply({ type: 'sleepfor' }, 222) === false, 'reply_id: a DIFFERENT reply_id is ignored (the butler cross)');
+    ok(t.inFlight != null, 'reply_id: command stays in-flight after a crossing reply');
+    ok(t.onReply({ type: 'agc' }, 111) === true, 'reply_id: matching reply_id resolves');
+    ok((await p).type === 'agc', 'reply_id: the CORRECT reply is delivered as the receipt');
+  }
+
+  // F) no reply_id (untraceable / broadcast) -> positional match still works (back-compat)
+  {
+    const t = new Timing({ sendSpacingMs: 0, replyTimeoutMs: 1000 });
+    const p = t.enqueue(async () => ({ id: 55 }), { match: (r) => r && r.ok });
+    await tick(0);
+    ok(t.onReply({ nope: 1 }, null) === false, 'null reply_id: positional match rejects a non-match');
+    ok(t.onReply({ ok: true }, null) === true, 'null reply_id: positional match accepts');
+    await p;
+  }
 }
 
 timingTests().then(() => {
