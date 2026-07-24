@@ -198,6 +198,7 @@ class Mesh extends EventEmitter {
   async listImages(node) { return this.images.list(node); }
   async getImage(node, pid, opts) { return this.images.get(node, pid, opts); } // -> Buffer
   async grabImage(node, opts) { return this.images.grab(node, opts); }          // capture -> fetch: { pid, bytes, buf }
+  async imageStats(node, pid) { return this.images.store.loadStats(node, pid); } // persisted per-pid transfer telemetry
   startImageListener() { return this.images.startListener(); }  // autonomous push catch
 
   // ---- daemon (long-running: model + autonomous image listener + domain feed) ----

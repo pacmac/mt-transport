@@ -208,8 +208,24 @@ async function testKeepOnIncomplete() {
   ok(!rx.corrupt && rx.missing().length > 0, 'keep: missing-chunk (incomplete) is never flagged corrupt');
 }
 
+// ---- 10. per-pid stats are persisted (and SURVIVE success) with real numbers ------
+async function testStats() {
+  const ref = {};
+  const dev = makeDevice(ref, { drop: new Set([2]) });     // one repair round
+  const images = makeImages(dev, mkTmp());
+  ref.obj = images;
+  const buf = await images.get('336b', 1);
+  ok(buf.equals(payload), 'stats: get succeeds through a repair');
+  const s = images.store.loadStats('336b', 1);
+  ok(s && s.outcome === 'ok' && s.crcOk === true, 'stats: persisted outcome=ok, crcOk');
+  ok(s.chunks === COUNT && s.received === COUNT, 'stats: chunks/received correct');
+  ok(s.repairs >= 1, 'stats: at least one repair recorded (chunk 2 was dropped)');
+  ok(typeof s.totalMs === 'number' && s.totalMs >= 0, 'stats: totalMs numeric');
+  ok(images.store.loadStats('336b', 1) !== null, 'stats: file SURVIVES success (not cleared)');
+}
+
 Promise.resolve()
   .then(testGet).then(testAutonomous).then(testResume).then(testGrab)
-  .then(testCrcClear).then(testKeepOnIncomplete)
+  .then(testCrcClear).then(testKeepOnIncomplete).then(testStats)
   .then(() => console.log(`images OK: ${pass} assertions passed`))
   .catch((e) => { console.error('images FAILED:', e && e.stack || e); process.exit(1); });

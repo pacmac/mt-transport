@@ -70,6 +70,7 @@ class PushReceiver {
     this.awaitingProgress = false;
     this.failed = null;
     this.corrupt = false;   // set when a COMPLETE set fails the whole-image CRC (unrecoverable by resume)
+    this.firstRxMs = null;  // nowMs of the first NEW chunk (stream start); lastRxMs = last frame
 
     this.stats = { chunkFrames: 0, dupes: 0, manifests: 0, progressReplies: 0,
                    startsSent: 0, queriesSent: 0, repairsSent: 0, repairIds: 0,
@@ -88,6 +89,7 @@ class PushReceiver {
     if (f.type === p.MSG.CHUNK) {
       this.stats.chunkFrames++;
       if (this.chunks.has(f.seq)) this.stats.dupes++;
+      else if (this.firstRxMs === null) this.firstRxMs = nowMs;   // first NEW chunk = stream start
       // Idempotent overwrite. A duplicate is not an error and not a special case.
       this.chunks.set(f.seq, Buffer.from(f.data));
       if (this.state === ST.START) this.state = ST.RECEIVING;

@@ -63,6 +63,22 @@ class PayloadStore {
     }
   }
 
+  // Per-pid transfer telemetry. PERSISTENT — unlike the partial, this survives completion,
+  // so a finished/failed transfer's stats remain readable across restarts.
+  _statsPath(node, pid) {
+    return path.join(this.dir, String(node).replace(/[^\w!-]/g, '_'), `pid${pid}.stats.json`);
+  }
+  saveStats(node, pid, stats) {
+    const p = this._statsPath(node, pid);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(stats, null, 2));
+    return p;
+  }
+  loadStats(node, pid) {
+    try { return JSON.parse(fs.readFileSync(this._statsPath(node, pid), 'utf8')); }
+    catch { return null; }
+  }
+
   // Retention is NOT implemented. Left explicit rather than silently absent.
   prune() { throw new Error('retention policy not implemented — see specs/mesh-images.md §7'); }
 }

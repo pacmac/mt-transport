@@ -108,68 +108,98 @@ class Images {
     const pollMs = T.pushPollMs != null ? T.pushPollMs : 1000;
     const deadline = Date.now() + (T.pushDeadlineMs != null ? T.pushDeadlineMs : 900000);
     const PROTO = this.protocol.PROTO_VERSION;
-
-    // Adopt / START, and resume from a persisted partial when the device confirms
-    // the SAME payload (crc+count). Never blend two images behind a reused pid.
-    let adopt = false;
-    let st = null;
+    const startedAt = Date.now();
+    let outcome = null, bytes = 0;   // captured for the per-pid stats record (finally)
     try {
-      st = await this.command(node, 'push', ['stat']);
-      if (st && st.proto !== undefined && st.proto !== PROTO) {
-        throw new MeshError(`image ${pid}: protocol mismatch — device v${st.proto} (fw ${st.fw}), client v${PROTO}`, 'EPROTO');
+      // Adopt / START, and resume from a persisted partial when the device confirms
+      // the SAME payload (crc+count). Never blend two images behind a reused pid.
+      let adopt = false;
+      let st = null;
+      try {
+        st = await this.command(node, 'push', ['stat']);
+        if (st && st.proto !== undefined && st.proto !== PROTO) {
+          throw new MeshError(`image ${pid}: protocol mismatch — device v${st.proto} (fw ${st.fw}), client v${PROTO}`, 'EPROTO');
+        }
+        if (st && st.upst === 0) {
+          throw new MeshError(`image ${pid}: device holds no published payload (upst=0)`, 'ENOIMG');
+        }
+        if (st && (st.upst === 2 || st.upst === 3) && st.up === pid) adopt = true;
+      } catch (e) {
+        if (e.code === 'EPROTO' || e.code === 'ENOIMG') throw e;
+        // no stat reply — fall through and START normally
       }
-      if (st && st.upst === 0) {
-        throw new MeshError(`image ${pid}: device holds no published payload (upst=0)`, 'ENOIMG');
+
+      if (st && st.crc !== undefined) {
+        const prior = this.store.loadPartial(node, pid);
+        if (prior && prior.crc === (st.crc >>> 0) && prior.count === st.cnt) {
+          rx.seed(prior);
+          this.log.debug('resume: seeded %d/%d for pid %d', prior.have.size, prior.count, pid);
+        } else if (prior) {
+          this.store.clearPartial(node, pid);
+        }
       }
-      if (st && (st.upst === 2 || st.upst === 3) && st.up === pid) adopt = true;
+
+      if (!adopt) this._sendControl(node, this.protocol.encodeStart(pid));
+
+      let lastPersistCount = -1;
+      while (Date.now() < deadline) {
+        if ((signal && signal.aborted) || entry.aborted) {
+          throw new MeshError(`image ${pid}: aborted`, 'EABORT');
+        }
+        await sleep(pollMs);
+
+        const out = rx.tick(Date.now());
+        if (out) this._sendControl(node, out);
+
+        if (rx.received !== lastPersistCount) { lastPersistCount = rx.received; this._persistPartial(node, rx); }
+        if (onProgress) { try { onProgress({ received: rx.received, count: rx.count }); } catch { /* never break the transfer */ } }
+
+        if (rx.failed) {
+          // Corrupt (CRC-mismatch on a complete set): the persisted partial holds bad bytes
+          // that resume can't recover, so drop it and force a fresh re-fetch. Incompleteness
+          // (stuck / unresponsive) KEEPS the partial — resume is how a marginal link converges.
+          if (rx.corrupt) this.store.clearPartial(node, pid);
+          throw new MeshError(`image ${pid}: ${rx.failed}`, 'EXFER');
+        }
+        if (rx.done) {
+          const buf = rx.assemble();
+          if (!buf) { this.store.clearPartial(node, pid); throw new MeshError(`image ${pid}: complete but CRC failed`, 'ECRC'); }
+          this.store.clearPartial(node, pid);
+          const path = this.store.save(buf, { pid, ptype: PT_IMAGE, node });
+          this.log.info('image saved: pid %d (%d bytes) -> %s', pid, buf.length, path);
+          this.emit('image', { node, pid, path, bytes: buf.length });
+          outcome = 'ok'; bytes = buf.length;
+          return { buf, path };
+        }
+      }
+      throw new MeshError(`image ${pid}: deadline at ${rx.received}/${rx.count}`, 'EDEADLINE');
     } catch (e) {
-      if (e.code === 'EPROTO' || e.code === 'ENOIMG') throw e;
-      // no stat reply — fall through and START normally
+      outcome = e.code || 'error';
+      throw e;
+    } finally {
+      this._recordStats(node, pid, rx, startedAt, outcome, bytes);
     }
+  }
 
-    if (st && st.crc !== undefined) {
-      const prior = this.store.loadPartial(node, pid);
-      if (prior && prior.crc === (st.crc >>> 0) && prior.count === st.cnt) {
-        rx.seed(prior);
-        this.log.debug('resume: seeded %d/%d for pid %d', prior.have.size, prior.count, pid);
-      } else if (prior) {
-        this.store.clearPartial(node, pid);
-      }
-    }
-
-    if (!adopt) this._sendControl(node, this.protocol.encodeStart(pid));
-
-    let lastPersistCount = -1;
-    while (Date.now() < deadline) {
-      if ((signal && signal.aborted) || entry.aborted) {
-        throw new MeshError(`image ${pid}: aborted`, 'EABORT');
-      }
-      await sleep(pollMs);
-
-      const out = rx.tick(Date.now());
-      if (out) this._sendControl(node, out);
-
-      if (rx.received !== lastPersistCount) { lastPersistCount = rx.received; this._persistPartial(node, rx); }
-      if (onProgress) { try { onProgress({ received: rx.received, count: rx.count }); } catch { /* never break the transfer */ } }
-
-      if (rx.failed) {
-        // Corrupt (CRC-mismatch on a complete set): the persisted partial holds bad bytes
-        // that resume can't recover, so drop it and force a fresh re-fetch. Incompleteness
-        // (stuck / unresponsive) KEEPS the partial — resume is how a marginal link converges.
-        if (rx.corrupt) this.store.clearPartial(node, pid);
-        throw new MeshError(`image ${pid}: ${rx.failed}`, 'EXFER');
-      }
-      if (rx.done) {
-        const buf = rx.assemble();
-        if (!buf) { this.store.clearPartial(node, pid); throw new MeshError(`image ${pid}: complete but CRC failed`, 'ECRC'); }
-        this.store.clearPartial(node, pid);
-        const path = this.store.save(buf, { pid, ptype: PT_IMAGE, node });
-        this.log.info('image saved: pid %d (%d bytes) -> %s', pid, buf.length, path);
-        this.emit('image', { node, pid, path, bytes: buf.length });
-        return { buf, path };
-      }
-    }
-    throw new MeshError(`image ${pid}: deadline at ${rx.received}/${rx.count}`, 'EDEADLINE');
+  // Build + persist (permanent) + log + emit the per-pid transfer stats on EVERY outcome.
+  _recordStats(node, pid, rx, startedAt, outcome, bytes) {
+    const s = rx.stats || {};
+    const finishedAt = Date.now();
+    const miss = (typeof rx.missing === 'function') ? rx.missing() : null;  // null before a manifest
+    const stats = {
+      pid, node, outcome: outcome || 'unknown', crcOk: outcome === 'ok', bytes,
+      chunks: rx.count, received: rx.received, missing: miss ? miss.length : null,
+      repairs: s.repairsSent, repairIds: s.repairIds, dupes: s.dupes, staleRounds: s.staleRounds,
+      startsSent: s.startsSent, queriesSent: s.queriesSent,
+      startedAt, firstChunkAt: rx.firstRxMs, finishedAt, totalMs: finishedAt - startedAt,
+      streamMs: (rx.firstRxMs != null && isFinite(rx.lastRxMs)) ? rx.lastRxMs - rx.firstRxMs : null,
+    };
+    try { this.store.saveStats(node, pid, stats); }
+    catch (e) { this.log.debug('saveStats failed: %s', e && e.message); }
+    this.log.info('image %s: pid %d %d/%d chunks, %d repairs, %d dupes, stream %ss total %ss',
+      stats.outcome, pid, rx.received, rx.count, stats.repairs || 0, stats.dupes || 0,
+      stats.streamMs != null ? (stats.streamMs / 1000).toFixed(1) : '?', (stats.totalMs / 1000).toFixed(1));
+    this.emit('image-stats', stats);
   }
 
   // ---- public API -----------------------------------------------------------

@@ -25,6 +25,7 @@ const VERBS = [
       const buf = await m.getImage(t, a[0]);
       const res = { pid: Number(a[0]), bytes: buf.length };
       if (o.out) { fs.writeFileSync(o.out, buf); res.out = o.out; }  // CLI owns file paths
+      res.stats = await m.imageStats(t, Number(a[0]));               // per-pid telemetry
       return res;                                                    // summary, never the raw Buffer
     } },
   { verb: 'image grab',  target: true,  args: '[--out FILE]', help: 'capture a fresh photo, then fetch it',
@@ -32,6 +33,7 @@ const VERBS = [
       const g = await m.grabImage(t);                                // { pid, bytes, buf }
       const res = { pid: g.pid, bytes: g.bytes };
       if (o.out) { fs.writeFileSync(o.out, g.buf); res.out = o.out; }
+      res.stats = await m.imageStats(t, g.pid);                       // per-pid telemetry
       return res;
     } },
   { verb: 'config get',  target: true,  args: '',              help: 'read device config',
