@@ -48,7 +48,7 @@ async function main() {
     await tick(0);
     ok(g.sent.length === 1 && g.sent[0].text === '@336b ping' && g.sent[0].opts.channel === 2,
       'ping sends "@336b ping" on ch2');
-    g.emit({ kind: 'text', text: '{"ok":1,"upt":5}', from: '!336b' });
+    g.emit({ kind: 'text', text: '{"ok":1,"upt":5}', from: '!336b', replyId: 1 });
     const r = await p;
     ok(r && r.ok === 1 && r.upt === 5, 'ping resolves with the JSON reply');
   }
@@ -58,7 +58,7 @@ async function main() {
     const { m, g } = wire();
     const p = m.status('336b', 'mem'); await tick(0);
     ok(g.sent[0].text === '@336b status mem', 'status mem builds "@336b status mem"');
-    g.emit({ kind: 'text', text: '{"heap":1000}', from: 'x' });
+    g.emit({ kind: 'text', text: '{"heap":1000}', from: 'x', replyId: 1 });
     ok((await p).heap === 1000, 'status resolves');
   }
 
@@ -86,7 +86,7 @@ async function main() {
     const p1 = m.ping('336b'); const p2 = m.ping('336b');
     await tick(0);
     ok(g.sent.length === 1, 'dedup: identical in-flight ping sent once');
-    g.emit({ kind: 'text', text: '{"ok":1}', from: 'x' });
+    g.emit({ kind: 'text', text: '{"ok":1}', from: 'x', replyId: 1 });
     const [r1, r2] = await Promise.all([p1, p2]);
     ok(r1.ok === 1 && r2.ok === 1, 'dedup: both callers receive the reply');
   }
@@ -128,7 +128,7 @@ async function main() {
     const { m, g } = wire();
     let sends = 0;
     const orig = g.sendText.bind(g);
-    g.sendText = async (gwId, text, o) => { sends++; const r = await orig(gwId, text, o); if (sends === 2) g.emit({ kind: 'text', text: '{"type":"pong"}', from: '!b' }); return r; };
+    g.sendText = async (gwId, text, o) => { sends++; const r = await orig(gwId, text, o); if (sends === 2) g.emit({ kind: 'text', text: '{"type":"pong"}', from: '!b', replyId: 1 }); return r; };
     const reply = await m.command('b80f', 'ping', [], { retries: 1, timeoutMs: 80 });
     ok(reply && reply.type === 'pong', 'retry: resend after timeout resolves');
     ok(sends === 2, 'retry: exactly 2 sends (1 dropped + 1 answered)');

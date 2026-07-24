@@ -79,10 +79,15 @@ class Timing {
   onReply(replyObj, replyId = null) {
     if (!this.inFlight) return false;
     const e = this.inFlight;
-    if (e.sentId != null && replyId != null) {
-      if (Number(replyId) !== e.sentId) return false;   // a different command's reply
+    if (e.sentId != null) {
+      // The device threads reply_id to our packet id (sendReply(msg, rx.id)). An UNSOLICITED frame
+      // (sleepfor / heartbeat / another command's reply) carries NO reply_id and must never be taken
+      // as our reply — require an exact match, reject anything without one. A timeout (honest "no
+      // reply") beats a wrong receipt. Was: only rejected when BOTH ids present and differing, so a
+      // no-reply_id frame fell through to the positional matcher and got consumed.
+      if (replyId == null || Number(replyId) !== e.sentId) return false;
     } else {
-      const m = e.opts.match;
+      const m = e.opts.match;   // no capturable sent id (rare) -> positional fallback
       if (m && !m(replyObj)) return false;
     }
     clearTimeout(e.timer);

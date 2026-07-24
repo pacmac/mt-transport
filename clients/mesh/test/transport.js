@@ -133,13 +133,28 @@ async function timingTests() {
     ok((await p).type === 'agc', 'reply_id: the CORRECT reply is delivered as the receipt');
   }
 
-  // F) no reply_id (untraceable / broadcast) -> positional match still works (back-compat)
+  // F) sentId captured -> an UNSOLICITED frame (no reply_id) must NOT be taken as our reply.
+  //    Reproduces the live bug: a `status` in-flight was acked with a {type:sleepfor} receipt. The
+  //    loose matcher (mirrors command()'s `r && typeof r === 'object'`) used to consume it; the fix
+  //    rejects any no-reply_id frame once a sent id was captured.
   {
     const t = new Timing({ sendSpacingMs: 0, replyTimeoutMs: 1000 });
-    const p = t.enqueue(async () => ({ id: 55 }), { match: (r) => r && r.ok });
+    const p = t.enqueue(async () => ({ id: 55 }), { match: (r) => r && typeof r === 'object' });
     await tick(0);
-    ok(t.onReply({ nope: 1 }, null) === false, 'null reply_id: positional match rejects a non-match');
-    ok(t.onReply({ ok: true }, null) === true, 'null reply_id: positional match accepts');
+    ok(t.onReply({ type: 'sleepfor', secs: 35 }, null) === false, 'sentId set: unsolicited frame (no reply_id) is REJECTED, not acked');
+    ok(t.inFlight != null, 'sentId set: command stays in-flight after the unsolicited frame');
+    ok(t.onReply({ type: 'status' }, 55) === true, 'sentId set: the matching reply_id resolves');
+    ok((await p).type === 'status', 'sentId set: the STATUS is the receipt, not the sleepfor');
+  }
+
+  // G) no captured sentId (send returned no id) -> positional match still applies (back-compat)
+  {
+    const t = new Timing({ sendSpacingMs: 0, replyTimeoutMs: 1000 });
+    const p = t.enqueue(async () => ({}), { match: (r) => r && r.ok });   // no id -> sentId stays null
+    await tick(0);
+    ok(t.inFlight && t.inFlight.sentId == null, 'no id in send result -> sentId null');
+    ok(t.onReply({ nope: 1 }, null) === false, 'sentId null: positional match rejects a non-match');
+    ok(t.onReply({ ok: true }, null) === true, 'sentId null: positional match accepts');
     await p;
   }
 }
