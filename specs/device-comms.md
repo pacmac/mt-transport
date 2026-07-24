@@ -22,6 +22,12 @@ NOT rediscover it each session, and do NOT invent a new path. Two services plus
 one BLE gateway node put you on the private mesh; the units answer `@`-prefixed
 text commands.
 
+> **Don't trust this list to be complete — run `scripts/services.sh` for the LIVE inventory.**
+> Beyond the two comms services below, background services also run: **`trial-logger`**
+> (systemd) passively records ALL mesh traffic to `pio/projects/pac-garage-alarm/data/mesh-YYYYMMDD.csv`
+> (~1 MB/day; the go-to for after-the-fact on-air evidence). This doc silently said "two
+> services" and missed trial-logger for weeks — hence the live script.
+
 **Authoritative API docs live in mt-radar** (read them for exhaustive detail; this
 file is the orientation + the recipes you actually run):
 
