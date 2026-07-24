@@ -1,49 +1,18 @@
 #!/usr/bin/env bash
-# Install/manage the mtmesh systemd service — the @pac/mesh domain listener (model +
-# autonomous image catcher + read-only /events). Sibling of mesh-gw.service; independent of
-# node-dash's PM2. Idempotent: re-run install to update the unit. See specs/mtmesh-systemd-service.md
+# Manage the mtmesh PM2 app — the @pac/mesh domain listener (model + image catcher + /events).
+# Under PM2 (not systemd) for one-pane management with node-dash. Boot-persistence is via
+# pm2-root (already configured); `pm2 save` after start/stop so a reboot restores state.
 #   mtmesh-service.sh [install|uninstall|status]   (default: install)
+# See specs/mtmesh-pm2.md.
 set -euo pipefail
-MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # clients/mesh
-NODE="$(command -v node || true)"
-UNIT=/etc/systemd/system/mtmesh.service
-cmd="${1:-install}"
-
-case "$cmd" in
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # clients/mesh
+case "${1:-install}" in
   install)
-    [ -n "$NODE" ] || { echo "node not found on PATH"; exit 1; }
-    cat > "$UNIT" <<UNITEOF
-[Unit]
-Description=mtmesh — @pac/mesh domain listener (model + image catcher + /events)
-After=network.target mesh-gw.service
-Wants=mesh-gw.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=$MODULE_DIR
-ExecStartPre=/bin/sleep 3
-ExecStart=$NODE bin/mtmesh.js listen --serve
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=mtmesh
-TimeoutStopSec=15
-
-[Install]
-WantedBy=multi-user.target
-UNITEOF
-    systemctl daemon-reload
-    systemctl enable --now mtmesh.service
-    systemctl --no-pager --lines=0 status mtmesh.service || true
-    echo "installed: $UNIT  (WorkingDirectory=$MODULE_DIR, node=$NODE)"
-    ;;
+    pm2 start "$DIR/ecosystem.config.cjs" && pm2 save
+    pm2 describe mtmesh | grep -E "status|script path|exec cwd" || true ;;
   uninstall)
-    systemctl disable --now mtmesh.service || true
-    rm -f "$UNIT"; systemctl daemon-reload
-    echo "removed: $UNIT" ;;
+    pm2 delete mtmesh || true; pm2 save ;;
   status)
-    systemctl --no-pager status mtmesh.service ;;
+    pm2 describe mtmesh ;;
   *) echo "usage: mtmesh-service.sh [install|uninstall|status]"; exit 2 ;;
 esac

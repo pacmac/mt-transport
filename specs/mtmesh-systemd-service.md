@@ -9,6 +9,10 @@ scope:
 # NOT changing: the daemon itself (mtmesh listen already works); config.yaml (gateway already configured).
 ---
 
+> **SUPERSEDED 2026-07-24 by mtmesh-pm2** — Peter chose PM2 over systemd for one-pane management
+> with node-dash. The systemd unit was removed; mtmesh now runs under PM2 (ecosystem.config.cjs).
+> This spec is kept for history only.
+
 # Spec: mtmesh-systemd-service — the mesh listener as a first-class service
 
 ## Why
