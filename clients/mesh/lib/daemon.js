@@ -131,6 +131,26 @@ class Daemon {
         const entry = await this.mesh.queueCommand(b.unit, b.verb, b.args || [], { ttlMs: b.ttlMs, maxAttempts: b.maxAttempts });
         return this._send(res, 200, entry);
       }
+      // Operator command with live/dev routing — dev: direct (returns the reply); live: queued
+      // via the butler (returns a queued ack). The daemon is the authority (state + butler).
+      if (p === '/command' && req.method === 'POST') {
+        const b = await this._body(req);
+        if (!b || !b.unit || !b.verb) return this._send(res, 400, { error: 'need {unit, verb, args?, force?}' });
+        try {
+          return this._send(res, 200, await this.mesh.dispatch(b.unit, b.verb, b.args || [], { force: !!b.force, noReply: b.noReply }));
+        } catch (e) {
+          return this._send(res, e && e.code === 'ELIVE' ? 409 : 502, { error: (e && e.message) || String(e), code: e && e.code });
+        }
+      }
+      // live/dev mode: GET /mode/:unit -> info; POST /mode {unit,mode} -> set/clear the override
+      // (persists to config AND applies to the running butler immediately).
+      const mm = p.match(/^\/mode\/(.+)$/);
+      if (mm && req.method === 'GET') return this._send(res, 200, await this.mesh.unitInfo(decodeURIComponent(mm[1])));
+      if (p === '/mode' && req.method === 'POST') {
+        const b = await this._body(req);
+        if (!b || !b.unit || !['dev', 'live', 'auto'].includes(b.mode)) return this._send(res, 400, { error: 'need {unit, mode: dev|live|auto}' });
+        return this._send(res, 200, await this.mesh.setUnitMode(b.unit, b.mode));
+      }
       if (p === '/queue' && req.method === 'GET') return this._send(res, 200, await this.mesh.queueList());
       const qm = p.match(/^\/queue\/(.+)$/);
       if (qm && req.method === 'GET') return this._send(res, 200, await this.mesh.queueList(decodeURIComponent(qm[1])));
@@ -150,8 +170,11 @@ class Daemon {
       if (p === '/nodes') return this._send(res, 200, await this.mesh.nodes());
       const m = p.match(/^\/nodes\/(.+)$/);
       if (m) {
-        const node = await this.mesh.node(decodeURIComponent(m[1]));
-        return node ? this._send(res, 200, node) : this._send(res, 404, { error: 'unknown node' });
+        const target = decodeURIComponent(m[1]);
+        const node = await this.mesh.node(target);
+        if (!node) return this._send(res, 404, { error: 'unknown node' });
+        const info = await this.mesh.unitInfo(target);   // mode + lastHeardMs + slp + awake
+        return this._send(res, 200, { ...node, ...info });
       }
       return this._send(res, 404, { error: 'not found' });
     } catch (e) {

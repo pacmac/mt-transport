@@ -21,6 +21,7 @@ function makeMesh() {
   m.model = { nodes: () => [{ id: '!a' }] };
   m.nodes = async () => [{ id: '!8cee336b', num: 1, name: '336b' }];
   m.node = async (id) => (id === '!8cee336b' ? { id, name: '336b' } : null);
+  m.unitInfo = async (id) => ({ id, mode: 'dev', lastHeardMs: null, slp: null, awake: true });
   return m;
 }
 function capture() { const lines = []; return { lines, out: { write: (s) => { lines.push(s); return true; } } }; }

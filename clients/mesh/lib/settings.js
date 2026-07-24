@@ -21,6 +21,11 @@ const DEFAULTS = Object.freeze({
   // text prefix (un-flashed firmware still requires it) — flip true, then remove, once
   // the whole fleet accepts bare-verb DMs.
   dm:      { default: true, fallbackChannel: 2, omitAddress: false },
+  // Per-unit interaction mode (live/dev): dev = direct sync command; live = auto-queue via the
+  // butler (asleep unit, deliver on wake). units.<id>.mode forces it; else auto (device slp /
+  // last-heard silence). silentMs = "not heard this long => assume asleep => live".
+  units:   {},
+  mode:    { silentMs: 150000 },
   listen:  { autoFetchImages: true, alerts: ['motion', 'fault'] },
   daemon:  { serve: false, host: '127.0.0.1', port: 8787 }, // opt-in read-only domain HTTP+WS surface
   notify:  { transports: { console: { enabled: true } }, routes: {} },
@@ -108,4 +113,20 @@ function load(opts = {}) {
   return cfg;
 }
 
-module.exports = { DEFAULTS, load, find };
+// Persist a per-unit mode override to config.yaml (units.<id>.mode). 'auto' clears it.
+// Writes to the located file, or the shipped module default if none exists yet.
+function setUnitMode(opts, id, mode) {
+  const file = find(opts) || path.join(__dirname, '..', 'config.yaml');
+  let doc = {};
+  try { doc = YAML.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { /* new/empty file */ }
+  doc.units = doc.units || {};
+  if (mode === 'auto') {
+    if (doc.units[id]) { delete doc.units[id].mode; if (!Object.keys(doc.units[id]).length) delete doc.units[id]; }
+  } else {
+    doc.units[id] = { ...(doc.units[id] || {}), mode };
+  }
+  fs.writeFileSync(file, YAML.stringify(doc));
+  return { id, mode, file };
+}
+
+module.exports = { DEFAULTS, load, find, setUnitMode };

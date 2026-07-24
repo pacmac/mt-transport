@@ -15,6 +15,19 @@ class Model {
     this._nodes.set(from, { ...prev, id: from, last: obj, ts: Date.now() });
   }
 
+  // A unit transmitted (the 'heard' signal, keyed by the REAL sender). Feeds live/dev mode.
+  heard(id, at = Date.now()) {
+    if (!id) return;
+    const prev = this._nodes.get(id) || { id };
+    this._nodes.set(id, { ...prev, id, lastHeardMs: at });
+  }
+  // Cache a unit's sleep state (a status/config reply's `slp`). Feeds live/dev mode.
+  sleep(id, slp) {
+    if (!id) return;
+    const prev = this._nodes.get(id) || { id };
+    this._nodes.set(id, { ...prev, id, slp: slp ? 1 : 0 });
+  }
+
   nodes() { return [...this._nodes.values()]; }   // array of summaries
   node(id) { return this._nodes.get(id) || null; } // one summary or null
 }

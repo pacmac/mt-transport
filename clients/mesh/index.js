@@ -101,7 +101,9 @@ class Mesh extends EventEmitter {
   // Route a normalized gw event into replies (timing) and the model.
   _onEvent(ev) {
     if (ev.kind === 'heard') {
-      // A unit transmitted → its wake window is open. Cue the butler (and surface for consumers).
+      // A unit transmitted → its wake window is open. Record last-heard (live/dev mode),
+      // cue the butler, and surface for consumers.
+      this.model.heard(ev.from, Date.now());
       this.emit('heard', { from: ev.from, portnum: ev.portnum, rssi: ev.rssi, snr: ev.snr });
       return;
     }
@@ -205,9 +207,69 @@ class Mesh extends EventEmitter {
     const { text, opts, key } = this._addressed(node, body, num, atToken);
     // Explicit noReply wins; otherwise auto-detect the by-another-route verbs.
     const nr = noReply != null ? noReply : (NO_REPLY.has(verb) || (a.length > 0 && NO_REPLY.has(`${verb} ${a[0]}`)));
-    return this.timing.enqueue(
+    const reply = await this.timing.enqueue(
       () => this.gw.sendText(this.gwId, text, opts),
       { match: (r) => r && typeof r === 'object', dedupKey: `${key}|${verb}`, retries, timeoutMs, noReply: !!nr });
+    // Learn the unit's sleep state from any reply that carries it (feeds live/dev mode).
+    if (num != null && reply && typeof reply === 'object' && reply.slp != null) {
+      this.model.sleep('!' + (num >>> 0).toString(16), reply.slp);
+    }
+    return reply;
+  }
+
+  // ---- live/dev mode (per-unit command routing) ----
+  // Resolve a unit's interaction mode. First match wins: explicit config override,
+  // then the device's known sleep state, then last-heard silence, else dev.
+  unitMode(id) {
+    const u = (this.cfg.units && this.cfg.units[id]) || {};
+    if (u.mode === 'dev' || u.mode === 'live') return u.mode;   // operator override
+    const n = this.model.node(id);
+    if (n && n.slp === 1) return 'live';                        // device reports sleep on
+    const silentMs = (this.cfg.mode && this.cfg.mode.silentMs) || 150000;
+    if (n && n.lastHeardMs && Date.now() - n.lastHeardMs > silentMs) return 'live'; // silent = asleep
+    return 'dev';
+  }
+
+  // Operator command path: dev → direct (synchronous, returns the reply); live → auto-queue via
+  // the butler (asynchronous, returns a queued ack — never a timeout on a sleeping unit).
+  // command() stays the DIRECT primitive; internal callers + the butler's deliver use it directly.
+  async dispatch(unit, verb, args = [], opts = {}) {
+    const id = await this._unitKey(unit);
+    const mode = this.unitMode(id);
+    if (mode === 'live') {
+      if (DANGER.has(verb) && !opts.force) {
+        throw new MeshError(`${verb}: '${unit}' is LIVE (sleeping) — re-run with --force to queue a side-effecting command`, 'ELIVE');
+      }
+      const entry = await this.queueCommand(unit, verb, args, opts);
+      const n = this.model.node(id);
+      return { queued: true, mode, id: entry.id, unit: id, verb, args: entry.args,
+               note: 'delivers on the unit\'s next wake window', lastHeardMs: n && n.lastHeardMs || null };
+    }
+    const reliab = this._cmdReliab(verb);
+    if (opts.noReply != null) reliab.noReply = opts.noReply;
+    return this.command(unit, verb, args, reliab);
+  }
+
+  // Mode + liveness for a unit (for the daemon's /nodes/:id and the `mode` verb).
+  async unitInfo(target) {
+    const id = await this._unitKey(target);
+    const n = this.model.node(id) || {};
+    const mode = this.unitMode(id);
+    return { id, mode, lastHeardMs: n.lastHeardMs || null, slp: n.slp != null ? n.slp : null, awake: mode === 'dev' };
+  }
+
+  // Set (or clear, with 'auto') a unit's mode override — persisted to config.yaml AND applied to
+  // this running instance so it takes effect immediately (the daemon re-reads config on restart).
+  async setUnitMode(target, mode) {
+    const id = await this._unitKey(target);
+    const r = settings.setUnitMode(this.opts, id, mode);
+    this.cfg.units = this.cfg.units || {};
+    if (mode === 'auto') {
+      if (this.cfg.units[id]) { delete this.cfg.units[id].mode; if (!Object.keys(this.cfg.units[id]).length) delete this.cfg.units[id]; }
+    } else {
+      this.cfg.units[id] = { ...(this.cfg.units[id] || {}), mode };
+    }
+    return { id, mode, file: r.file, resolved: this.unitMode(id) };
   }
   async ping(node) { return this.command(node, 'ping', [], this._idem()); }
   async status(node, domain) { return this.command(node, 'status', domain ? [domain] : [], this._idem()); }
