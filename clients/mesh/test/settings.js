@@ -20,7 +20,7 @@ try {
   // file over defaults; unset keys keep DEFAULTS
   let c = settings.load({ configPath: cfgPath });
   ok(c.channel === 5 && c.gw.host === 'filehost' && c.gw.gatewayId === '!file', 'file overrides defaults');
-  ok(c.gw.port === 8000 && c.timing.sendSpacingMs === 3000, 'unset keys keep DEFAULTS');
+  ok(c.gw.port === 8001 && c.timing.sendSpacingMs === 3000, 'unset keys keep DEFAULTS (mesh-gw :8001, never node-dash :8000)');
   ok(c.logLevel === 'debug', 'file logLevel applied');
 
   // env over file
@@ -38,9 +38,9 @@ try {
   ok(c.gw.host === '1.2.3.4' && c.gw.port === 9001 && c.gw.sendPort === 9001,
     'opts.gw host:port sets host+port+sendPort');
 
-  // host-only override leaves ports untouched (from DEFAULTS: 8000/8000)
+  // host-only override leaves ports untouched (from DEFAULTS: 8001/8001 = mesh-gw)
   c = settings.load({ configPath: cfgPath, gw: 'onlyhost' });
-  ok(c.gw.host === 'onlyhost' && c.gw.port === 8000 && c.gw.sendPort === 8000,
+  ok(c.gw.host === 'onlyhost' && c.gw.port === 8001 && c.gw.sendPort === 8001,
     'host-only override leaves ports as-is');
 
   // env MTMESH_GW host:port also moves both ports

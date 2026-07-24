@@ -8,7 +8,10 @@ const YAML = require('yaml');
 // The ONLY place defaults live. A missing config.yaml still yields a usable set.
 // Identity (gatewayId) is config, never code — hence null here.
 const DEFAULTS = Object.freeze({
-  gw:      { host: 'localhost', port: 8000, sendPort: 8000, eventsPath: '/events', gatewayId: null },
+  // mesh-gw DIRECT (:8001, raw REST + ws:8001/events, owns all BLE — device-comms.md:53). NEVER
+  // :8000/node-dash: mtmesh must NOT depend on their service and must survive node-dash being
+  // abandoned. mesh-gw or nothing — if mesh-gw is down, failing is correct; never fall back onto them.
+  gw:      { host: 'localhost', port: 8001, sendPort: 8001, eventsPath: '/events', gatewayId: null },
   channel: 2, // never 0
   logLevel: 'info', // silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides. See lib/log.js.
   paths:   { store: './payloads', log: './mtmesh.log' },

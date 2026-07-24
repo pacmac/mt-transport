@@ -1,45 +1,61 @@
-# mtmesh config — the ONLY place vars/paths/timings live. Override order:
-# defaults(code) < this file < env(MTMESH_*) < CLI flags.
 gw:
   host: localhost
-  port: 8000            # node-dash proxy fronts send + events
-  sendPort: 8000
+  # mesh-gw DIRECT — raw REST + ws:8001/events, owns all BLE (device-comms.md:53).
+  # NEVER route via node-dash (:8000): we must not depend on their service. node-dash may depend on
+  # our libs; never the reverse. Was wrongly :8000 (node-dash proxy) — fixed 2026-07-24.
+  port: 8001
+  sendPort: 8001
   eventsPath: /events
-  gatewayId: "!2687afb1"  # OMNI gateway (channel 2) — the BLE gateway node
-channel: 2             # PRIVATE FALLBACK channel (broadcast when a DM can't be addressed); never 0 (PRIMARY)
-dm:                     # directed PKC DM is the default send; private channel is the fallback
-  default: true         # true => command/control go as a directed DM (to:num) on channel 0 (PKC)
-  fallbackChannel: 2    # broadcast here when num is unknown / target is '*' / dm.default is false
-  omitAddress: false    # TEMP: keep the @<target> text prefix until the fleet is flashed, then flip true + remove
-logLevel: info         # silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides
+  gatewayId: "!2687afb1"
+channel: 2
+dm:
+  default: true
+  fallbackChannel: 2
+  omitAddress: false
+logLevel: info
 paths:
   store: ./payloads
-  log:   ./mtmesh.log
+  log: ./mtmesh.log
 timing:
   sendSpacingMs: 3000
   replyTimeoutMs: 20000
-  wsMaxPayload: 0        # gateway opens with a multi-MB snapshot
+  wsMaxPayload: 0
   chunkAnswerMs: 8000
   idleMs: 240000
   pushDeadlineMs: 900000
-  pushQuietMs: 15000     # post-stream quiet wait before PROGRESS_Q; must exceed the device's max inter-chunk gap (~9s). actMs(4s) < quietMs(15s) < push idle(35s)
+  pushQuietMs: 15000
 retry:
-  commands: false        # raw command() escape hatch: never blind-retry (reboot/wedge live here)
-  idempotent: 2          # resends for KNOWN-idempotent domain cmds (ping/status/config/image control)
-  attemptTimeoutMs: 10000 # per-attempt reply wait for those (device answers <10s or never)
+  commands: false
+  idempotent: 2
+  attemptTimeoutMs: 10000
 listen:
   autoFetchImages: true
-  alerts: [motion, fault]
+  alerts:
+    - motion
+    - fault
 daemon:
-  serve: false          # opt-in read-only domain HTTP+WS surface (mtmesh listen --serve)
-  host: 127.0.0.1       # loopback only by default
-  port: 8787            # GET /health /nodes /nodes/:id ; WS /events (domain feed)
+  serve: false
+  host: 127.0.0.1
+  port: 8787
 notify:
   transports:
-    console:  { enabled: true }
-    email:    { enabled: false, to: "" }
-    webhook:  { enabled: false, url: "" }
-    whatsapp: { enabled: false }
+    console:
+      enabled: true
+    email:
+      enabled: false
+      to: ""
+    webhook:
+      enabled: false
+      url: ""
+    whatsapp:
+      enabled: false
   routes:
-    motion: [console]
-    fault:  [console]
+    motion:
+      - console
+    fault:
+      - console
+units:
+  "!987ab80f":
+    mode: dev
+  "!8cee336b":
+    mode: live
