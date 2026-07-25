@@ -54,6 +54,13 @@ notify:
       - console
     fault:
       - console
+# OUR alarm devices — the declared half of the device registry (GET /v1/mesh/devices).
+# Keyed by node id; `label` is operator-facing only. Declaring a unit here keeps it in
+# the device list while it is ASLEEP; the other half is learned from 260/261 traffic.
+# The gateway (!2687afb1) is NOT listed: it is our radio, not one of our devices.
+devices:
+  "!8cee336b": { label: "Bench alarm" }
+  "!987ab80f": { label: "Garage alarm" }
 units:
   "!987ab80f":
     mode: dev

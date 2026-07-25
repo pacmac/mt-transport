@@ -76,6 +76,11 @@ module.exports = {
     return {
       routes: [
         // ---- reads ----------------------------------------------------------
+        // OUR devices only. /nodes below returns the WHOLE mesh (third-party nodes
+        // included, deliberately) — this is the list a dashboard builds a device UI
+        // from, so it never hardcodes node ids. No device round-trip: safe to poll,
+        // and it still lists a declared unit while that unit is asleep.
+        ['GET', '/devices', async () => mesh.devices()],
         ['GET', '/nodes', async () => mesh.nodes()],
         ['GET', '/nodes/:target', async ({ params }) => {
           // Resolve FIRST: mesh.node() matches only a full '!id' or num, while callers

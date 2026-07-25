@@ -51,6 +51,10 @@ class Mesh extends EventEmitter {
     this.gwId = null;
     this.channel = null;
     this._roster = [];        // cached gateway node list ({id,num,name}) for target->num
+    // The device registry (which node ids are OURS). Created HERE, not in connect(),
+    // because _onEvent -> _markOurs can run on any instance and must never depend on
+    // connect() having populated it. connect() SEEDS it from config + disk.
+    this._ours = new Set();
   }
 
   // ---- lifecycle ----
@@ -93,6 +97,16 @@ class Mesh extends EventEmitter {
       this.butler.on(ev, (e) => this.emit('command-' + ev, e));
     }
     this.on('heard', (e) => { this.butler.onHeard(e.from).catch((err) => log.debug('butler onHeard: %s', err && err.message)); });
+
+    // The device registry: which node ids are OURS. Two sources, union.
+    //   - DECLARED (cfg.devices): authoritative, and present even for a unit that is
+    //     asleep or has never been heard. NOT cfg.units — that is a mode-override map,
+    //     so a unit with no override is absent from it and would silently vanish here.
+    //   - LEARNED (a 260/261 frame decoded from it): only our firmware sends those, so
+    //     it is proof rather than a naming convention. Persisted, because a unit asleep
+    //     since the last restart has sent us nothing.
+    for (const id of Object.keys(this.cfg.devices || {})) this._ours.add(id);
+    for (const id of this.images.store.loadDevices()) this._ours.add(id);
     this.gw.onEvent((ev) => this._onEvent(ev));
     log.debug('connecting to gw %s (gwId %s, channel %d)', this.cfg.gw.host, this.gwId, this.channel);
     await this.gw.connect();
@@ -122,6 +136,7 @@ class Mesh extends EventEmitter {
       return;
     }
     if (ev.kind === 'app' && ev.portnum === PORT_ALARM) {
+      this._markOurs(ev.from);
       const obj = protocol.parse260(ev.payload);
       if (obj && obj.t === 'sch') { this.config.onSchemaFrame(ev.from, obj); return; } // schema page, not model state
       this.model.apply({ from: ev.from, obj });
@@ -129,8 +144,21 @@ class Mesh extends EventEmitter {
       return;
     }
     if (ev.kind === 'app' && ev.portnum === PORT_CHUNK) {
+      this._markOurs(ev.from);
       this.images.onFrame(ev.payload, ev.from);
     }
+  }
+
+  // Learn that a node is ours. Runs on EVERY protocol frame, so the already-known case
+  // must stay in memory — persisting per frame would write to disk continuously.
+  _markOurs(id) {
+    if (!id || this._ours.has(id)) return;
+    this._ours.add(id);
+    log.info('device registry: learned %s (speaks our protocol)', id);
+    const store = this.images && this.images.store;
+    if (!store) return;                     // no store wired (bare instance) — memory only
+    try { store.saveDevices([...this._ours]); }
+    catch (e) { log.warn('device registry: persist failed: %s', e && e.message); }
   }
 
   // ---- events (typed, domain-level): 'node','reply','detection','image-available','alert','error'
@@ -139,6 +167,53 @@ class Mesh extends EventEmitter {
   // ---- live model ----
   async nodes() { return this._summaries(await this.gw.nodes(this.gwId)); }
   async node(id) { return (await this.nodes()).find((n) => n.id === id || n.num === id) || null; }
+
+  // OUR devices only — the dynamic device list a dashboard builds its UI from, so it
+  // never hardcodes node ids. Everything here is already in hand (roster + model +
+  // registry): no device round-trip, so it is safe to poll and works with every unit
+  // asleep. Liveness (mode/awake/slp) is included so a consumer does not have to follow
+  // up with N calls to /mode/:target just to render a list.
+  async devices() {
+    const roster = new Map();
+    try { for (const n of await this.nodes()) roster.set(n.id, n); }
+    catch (e) { log.debug('devices: roster unavailable: %s', e && e.message); }
+
+    const declared = this.cfg.devices || {};
+    const ids = [...new Set([...Object.keys(declared), ...this._ours])].sort();
+
+    return ids.map((id) => {
+      const r = roster.get(id) || null;
+      const u = (r && r.raw && r.raw.user) || {};
+      const m = this.model.node(id) || {};
+      const pos = (r && r.raw && r.raw.position) || null;
+      const name = r ? r.name : null;
+      // The firmware puts the build in the long name as "<suffix> <version>". Parse it
+      // if it matches and leave it null otherwise — never guess a version.
+      const fwMatch = typeof name === 'string' ? name.match(/^[0-9a-f]{4}\s+(\S+)$/i) : null;
+      return {
+        id,
+        num: r ? r.num : null,
+        name,
+        shortName: u.short_name || null,
+        label: (declared[id] && declared[id].label) || null,
+        source: declared[id] ? 'config' : 'learned',
+        // A DECLARED device stays listed while asleep or unheard — vanishing from the
+        // list because it is sleeping is precisely what this route exists to prevent.
+        present: !!r,
+        mode: this.unitMode(id),
+        awake: this.unitMode(id) === 'dev',
+        slp: m.slp != null ? m.slp : null,
+        lastHeard: r ? r.lastHeard : null,
+        lastHeardMs: m.lastHeardMs || null,
+        fw: fwMatch ? fwMatch[1] : null,
+        position: pos && pos.latitude_i != null
+          ? { lat: pos.latitude_i / 1e7, lon: pos.longitude_i / 1e7 } : null,
+        hops: r ? r.hops : null,
+        rssi: (r && r.raw && r.raw.rssi != null) ? r.raw.rssi : null,
+        snr: (r && r.raw && r.raw.snr != null) ? r.raw.snr : null,
+      };
+    });
+  }
 
   // Normalize the gateway node roster. VERIFIED live 2026-07-23 against
   // :8001/{gwId}/nodes: { total, count, filter, nodes } where `nodes` is a DICT
@@ -153,12 +228,17 @@ class Mesh extends EventEmitter {
     return list.map((e) => {
       const u = e.user || {};
       const num = e.num != null ? e.num : e.from_num;
+      const id = e.node_id || e.id || (num != null ? '!' + (num >>> 0).toString(16) : null);
       return {
-        id: e.node_id || e.id || (num != null ? '!' + (num >>> 0).toString(16) : null),
+        id,
         num,
         name: u.long_name || u.short_name || e.long_name || e.short_name || null,
         lastHeard: e.last_heard != null ? e.last_heard : null,
         hops: e.hops != null ? e.hops : null,
+        // Is this one of OUR alarm devices, or just another node on the shared mesh?
+        // The roster is returned WHOLE (third-party nodes included, deliberately) —
+        // this flag is what lets a consumer tell them apart without hardcoding ids.
+        ours: this._ours.has(id),
         raw: e,
       };
     });

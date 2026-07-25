@@ -153,7 +153,8 @@ mechanics — no ports, frames, channels or queues cross this boundary.
 
 | route | |
 |---|---|
-| `GET /v1/mesh/nodes` | node roster: id, num, name, lastHeard, hops |
+| `GET /v1/mesh/devices` | **OUR devices only** — the dynamic device list, see below |
+| `GET /v1/mesh/nodes` | node roster (the WHOLE mesh): id, num, name, lastHeard, hops, `ours` |
 | `GET /v1/mesh/nodes/:target` | one node + live/dev mode, `awake`, `slp` |
 | `GET /v1/mesh/queue` | butler ledger (all units) |
 | `GET /v1/mesh/queue/:target` | ledger for one unit |
@@ -179,6 +180,42 @@ Check `GET /v1/mesh/mode/:target` → `awake` first, or queue a command instead.
 an **id** immediately and is delivered in the unit's next wake window. Poll
 `GET /v1/mesh/queue` or watch events for the receipt. Do not expect a synchronous
 device reply.
+
+### Devices vs nodes — build your device list dynamically, never from hardcoded ids
+
+`/nodes` is **the whole mesh** and stays that way: our units are ordinary Meshtastic
+nodes and third-party nodes are not hidden from you. But most of the mesh is not ours,
+so `/devices` answers the different question — *which nodes are the alarm devices*.
+
+```json
+[{ "id": "!987ab80f", "num": 2558179343,
+   "name": "b80f 2-260724-3", "shortName": "GARG", "label": "Garage alarm",
+   "source": "config", "present": true,
+   "mode": "live", "awake": false, "slp": 1,
+   "lastHeard": 1784976618, "lastHeardMs": 1784976618000,
+   "fw": "2-260724-3",
+   "position": { "lat": 51.014683, "lon": -3.128249 },
+   "hops": 0, "rssi": -120, "snr": -14 }]
+```
+
+- **`mode`/`awake`/`slp` are included deliberately** so you render a device list in ONE
+  call instead of following up with N requests to `/mode/:target`.
+- **`present: false` means we know the device but the gateway has no roster entry** —
+  typically a unit that has not been heard since our last restart. It is still listed:
+  a device must not disappear from your UI because it is asleep. Signal fields are
+  `null` in that case, never zero.
+- **`source`** is `config` (declared on our side) or `learned` (it spoke our private
+  protocol). Informational — treat both as ours.
+- **`fw`** is parsed from the long name and is `null` if it does not match the expected
+  shape. We never guess a version.
+- The **gateway is not a device.** `!2687afb1` is our radio, not an alarm unit, so it
+  appears in `/nodes` but never in `/devices`.
+
+`/nodes` additionally carries **`ours: true|false`** per entry, so a single combined
+view can filter without a second call. Same information, two shapes — pick one.
+
+Neither route does a device round-trip, so both are safe to poll and both work with
+every unit asleep.
 
 ### Config schema — build your form from the DEVICE, not a hardcoded list
 

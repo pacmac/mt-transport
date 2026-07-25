@@ -28,6 +28,12 @@ const DEFAULTS = Object.freeze({
   // butler (asleep unit, deliver on wake). units.<id>.mode forces it; else auto (device slp /
   // last-heard silence). silentMs = "not heard this long => assume asleep => live".
   units:   {},
+  // The DECLARED half of the device registry: which node ids are OUR alarm devices,
+  // keyed by id -> { label }. Distinct from `units` above, which only holds mode
+  // overrides — a unit with no override is absent from it, so it cannot answer
+  // "is this ours". Declaring a device here keeps it in GET /devices even while it is
+  // asleep and has never been heard. The other half is learned from 260/261 traffic.
+  devices: {},
   mode:    { silentMs: 150000 },
   listen:  { autoFetchImages: true, alerts: ['motion', 'fault'] },
   daemon:  { serve: false, host: '127.0.0.1', port: 8787 }, // opt-in read-only domain HTTP+WS surface

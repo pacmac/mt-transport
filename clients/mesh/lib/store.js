@@ -7,11 +7,18 @@
 
 const fs = require('fs');
 const path = require('path');
+const { Cache } = require('./cache');
 
 const EXT = { 1: 'json', 2: 'jpg', 3: 'log', 4: 'json' }; // SCHEMA/IMAGE/LOG/JSON
 
 class PayloadStore {
-  constructor({ dir = './payloads' } = {}) { this.dir = dir; }
+  constructor({ dir = './payloads' } = {}) {
+    this.dir = dir;
+    // Everything that must survive a restart but is not a payload file lives here.
+    // Kept OUT of the per-node payload dirs so a node dir stays what it says it is:
+    // images and transfer parts.
+    this.cache = new Cache(path.join(dir, 'cache'));
+  }
 
   save(buf, { pid, ptype = 2, node = 'unknown', when = Date.now() } = {}) {
     const ext = EXT[ptype] || 'bin';
@@ -97,32 +104,63 @@ class PayloadStore {
     return { sub, file: path.join(sub, 'schema.json') };
   }
 
+  // Now backed by the generic Cache (ns 'schema'). The RETURN SHAPE IS UNCHANGED —
+  // callers (lib/config.js) still get the schema object with `fetchedAt`, so this is
+  // storage moving, not an interface change. No TTL: a schema is only invalidated by a
+  // firmware flash, which `?refresh=1` handles explicitly.
   saveSchema(node, schema) {
-    const p = this._schemaPath(node);
-    fs.mkdirSync(p.sub, { recursive: true });
-    fs.writeFileSync(p.file, JSON.stringify({ ...schema, fetchedAt: Date.now() }));
+    this.cache.put('schema', node, { ...schema, fetchedAt: Date.now() });
   }
 
   loadSchema(node) {
-    const p = this._schemaPath(node);
-    try { return JSON.parse(fs.readFileSync(p.file, 'utf8')); }
-    catch { return null; }   // absent or corrupt: treat as "no cache", never throw
+    const hit = this.cache.value('schema', node);
+    if (hit) return hit;
+    // Legacy location (<store>/<node>/schema.json), written before the cache existed.
+    // Read it once and promote it, so an existing install does not lose a schema it
+    // already paid a wake window to fetch.
+    try {
+      const legacy = JSON.parse(fs.readFileSync(this._schemaPath(node).file, 'utf8'));
+      if (legacy && Array.isArray(legacy.fields)) { this.cache.put('schema', node, legacy); return legacy; }
+    } catch { /* absent or corrupt: treat as "no cache", never throw */ }
+    return null;
+  }
+
+  // ---- device registry ------------------------------------------------------
+  // Which node ids are OURS (they speak our private protocol on port 260/261).
+  // Persisted for the same reason as the schema: a unit asleep since the last restart
+  // has told us nothing, and it must not disappear from the device list because of it.
+  saveDevices(ids) { this.cache.put('registry', 'devices', [...new Set(ids)].filter(Boolean)); }
+
+  loadDevices() {
+    const v = this.cache.value('registry', 'devices');
+    return Array.isArray(v) ? v : [];
   }
 
   // Any persisted schema, newest first — used as a fallback for a unit we have never
   // polled, since the schema is firmware-global.
   anySchemas() {
     const out = [];
+    // Cache first (the current location), then the legacy per-node files below, so a
+    // half-migrated install still finds every copy it holds.
+    for (const e of this.cache.all('schema')) {
+      if (e.value && Array.isArray(e.value.fields)) out.push({ node: e.key, ...e.value });
+    }
     let subs = [];
     try { subs = fs.readdirSync(this.dir, { withFileTypes: true }).filter((d) => d.isDirectory()); }
     catch { return out; }
     for (const d of subs) {
+      if (d.name === 'cache') continue;                // the cache dir is read above
       try {
         const j = JSON.parse(fs.readFileSync(path.join(this.dir, d.name, 'schema.json'), 'utf8'));
         if (j && Array.isArray(j.fields)) out.push({ node: d.name, ...j });
       } catch { /* skip */ }
     }
-    return out.sort((a, b) => (b.fetchedAt || 0) - (a.fetchedAt || 0));
+    // A node can appear in BOTH locations mid-migration; keep only its newest copy so
+    // the caller's "first match wins" fallback cannot pick up a superseded schema.
+    const seen = new Set();
+    return out
+      .sort((a, b) => (b.fetchedAt || 0) - (a.fetchedAt || 0))
+      .filter((s) => (seen.has(s.node) ? false : (seen.add(s.node), true)));
   }
 
   _queuePath(node) {
