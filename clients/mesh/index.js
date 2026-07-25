@@ -114,6 +114,11 @@ class Mesh extends EventEmitter {
     if (ev.kind === 'text') {
       const reply = protocol.parseReply(ev.text);
       if (reply) { this.timing.onReply(reply, ev.replyId); this.emit('reply', reply, ev.from); }
+      // Not our JSON protocol => a HUMAN message. Previously dropped on the floor,
+      // which meant an operator texting the mesh was invisible to this service.
+      // Surfaced as 'text' so a console/chat consumer can see it; deliberately NOT
+      // fed to timing.onReply, since it correlates to no command.
+      else this.emit('text', { from: ev.from, text: ev.text, channel: ev.channel, replyId: ev.replyId });
       return;
     }
     if (ev.kind === 'app' && ev.portnum === PORT_ALARM) {
@@ -275,6 +280,24 @@ class Mesh extends EventEmitter {
     }
     return { id, mode, file: r.file, resolved: this.unitMode(id) };
   }
+  // Send FREE-FORM text (a human message), not a command. Deliberately separate from
+  // command()/_sendRaw(): those build an addressed "@target verb" and force channel 0
+  // (PKC DM), which for a handheld like TA2m does NOT decode in either direction —
+  // measured. Chat therefore needs explicit channel control, so it is exposed here
+  // rather than bolted onto the command path.
+  //   to      target (num, '!id' or short form). Omit for a broadcast on the channel.
+  //   channel defaults to the configured private channel, NOT 0.
+  async sendText(text, { to, channel } = {}) {
+    if (typeof text !== 'string' || !text.length) throw new MeshError('sendText: text required', 'EUSAGE');
+    const opts = { channel: channel != null ? channel : this.channel };
+    if (to != null && to !== '*') {
+      const r = await this._resolve(to);
+      if (r.num == null) throw new MeshError(`sendText: cannot resolve target ${to}`, 'ETARGET');
+      opts.to = r.num;
+    }
+    return this.gw.sendText(this.gwId, text, opts);
+  }
+
   async ping(node) { return this.command(node, 'ping', [], this._idem()); }
   async status(node, domain) { return this.command(node, 'status', domain ? [domain] : [], this._idem()); }
 

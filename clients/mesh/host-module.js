@@ -23,6 +23,7 @@ const { log: rootLog } = require('./lib/log');
 const WIRE_EVENTS = {
   node:              'node',
   reply:             'reply',
+  text:              'text',        // free-form human message (not our JSON protocol)
   detection:         'detection',
   alert:             'alert',
   'image-available': 'image-available',
@@ -119,6 +120,21 @@ module.exports = {
           if (!body || !body.unit || !['dev', 'live', 'auto'].includes(body.mode))
             return reply(400, { error: 'need {unit, mode: dev|live|auto}' });
           return mesh.setUnitMode(body.unit, body.mode);
+        }],
+
+        // ---- free-form text (human chat), NOT a command ----------------------
+        // Separate from /command because chat needs explicit channel control: the
+        // command path forces channel 0 (PKC DM), which does not decode for a
+        // handheld. Default channel is the configured private one.
+        // CAUTION: this puts arbitrary text on a SHARED mesh. Address it, and only
+        // to nodes that are ours to talk to.
+        ['POST', '/text', async ({ body }) => {
+          if (!body || typeof body.text !== 'string' || !body.text.length)
+            return reply(400, { error: 'need {text, to?, channel?}' });
+          try {
+            const r = await mesh.sendText(body.text, { to: body.to, channel: body.channel });
+            return { sent: true, to: body.to ?? null, channel: body.channel ?? null, result: r ?? null };
+          } catch (e) { return reply(502, { error: (e && e.message) || String(e), code: e && e.code }); }
         }],
 
         // ---- config: the device's SELF-DESCRIBING field table -----------------
