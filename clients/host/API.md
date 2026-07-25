@@ -263,6 +263,54 @@ view can filter without a second call. Same information, two shapes — pick one
 Neither route does a device round-trip, so both are safe to poll and both work with
 every unit asleep.
 
+### Antenna alignment — the backend owns the whole view-model
+
+| route | |
+|---|---|
+| `POST /v1/mesh/align/ping` | `{target, n?}` — opens/retargets the session, fires one burst |
+| `POST /v1/mesh/align/stop` | end the session |
+| `GET /v1/mesh/align` | the complete view-model (polling fallback) |
+| `POST /v1/mesh/align/config` | `{replyWindowSec}` (5–120) — server-persisted |
+
+The model is pushed complete on every change as the **`mesh.align`** SSE event, and is
+byte-identical to what the previous WebSocket sent — same field names, so a rebuilt UI
+needs no adapter.
+
+**Every derived value is computed here**: `quality` (0–100), `label`, `cls`, `trendDir`,
+`trendDelta`, `best`, `gapToBest`, `bestAgo`, `barPct`. The page renders and computes
+nothing, so two phones on one session show identical screens.
+
+```json
+{ "kind": "align", "running": true, "target": 2364420971, "tx": "OMNI", "channel": 2,
+  "nBurst": 4, "replyWindowSec": 30,
+  "burst": { "active": true, "got": 1, "of": 4 },
+  "warning": null, "best": { "n": 2 },
+  "current": { "n": 3, "quality": 62, "label": "Good", "cls": "success",
+               "isBest": false, "gapToBest": 15, "bestN": 2, "bestAgo": 1 },
+  "readings": [{ "n": 1, "quality": 47, "label": "Fair", "cls": "warning",
+                 "spread": 3, "got": 4, "of": 4, "rssi": -90, "snr": 0.5,
+                 "yagi_q": 30, "omni_q": 50, "barPct": 42,
+                 "isBest": false, "isCurrent": false, "trendDir": null, "trendDelta": null }] }
+```
+
+**It is a spot measurement, not a meter.** One press fires a *burst* of N pings ~1.2 s
+apart and averages them, because a single ping jitters ~0.7 dB at a fixed position. A
+reply takes ~16 s, so a burst takes tens of seconds. `POST /align/ping` returns as soon as
+the pings are away — watch the event for the result. A second press while a burst is
+gathering returns **409**.
+
+**Three signals, do not conflate them.** `quality`/`rssi`/`snr` are **the device's own
+reading of our ping**, measured at the antenna being turned — that is the primary number
+and the one to align on. `yagi_q`/`omni_q` are *our* antennas hearing the device, and are
+secondary. **A radio that heard nothing is `null`, never `0`** — render it as a gap, since
+`0` would read as "terrible signal" when the truth is "no data from that antenna".
+
+`warning: "No replies — try again."` means the burst landed nothing. No reading is
+invented for a silent burst.
+
+`channel` and `tx` are **reported** so the UI can display them; neither is accepted as
+input. Channel selection, addressing and reply correlation stay on our side.
+
 ### Config schema — build your form from the DEVICE, not a hardcoded list
 
 `GET /v1/mesh/schema/:target` returns the device's own description of every settable

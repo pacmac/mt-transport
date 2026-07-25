@@ -58,6 +58,13 @@ notify:
 # Keyed by node id; `label` is operator-facing only. Declaring a unit here keeps it in
 # the device list while it is ASLEEP; the other half is learned from 260/261 traffic.
 # The gateway (!2687afb1) is NOT listed: it is our radio, not one of our devices.
+# Alignment: which physical antenna is which, keyed by NODE ID (an id survives a MAC
+# change, and keeps identity out of code). The labels are the view-model field names —
+# `yagi` feeds yagi_q, `omni` feeds omni_q.
+align:
+  radios:
+    omni: "!2687afb1"
+    yagi: "!fa39f7b4"
 devices:
   "!8cee336b": { label: "Bench alarm" }
   "!987ab80f": { label: "Garage alarm" }

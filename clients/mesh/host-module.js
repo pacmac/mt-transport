@@ -39,6 +39,10 @@ const WIRE_EVENTS = {
   'request-failed':    'request-failed',
   'request-expired':   'request-expired',
   'request-cancelled': 'request-cancelled',
+  // The COMPLETE alignment view-model on every change. The browser renders it and decides
+  // nothing — quality, labels, best, trend and bar heights are all computed server-side,
+  // so two phones on one session show identical screens.
+  align:               'align',
   // 'error' MUST be subscribed: an unhandled 'error' on an EventEmitter throws, and
   // in a shared host that would take down the recorder too.
   error:             'error',
@@ -163,6 +167,31 @@ module.exports = {
             const r = await mesh.sendText(body.text, { to: body.to, channel: body.channel });
             return { sent: true, to: body.to ?? null, channel: body.channel ?? null, result: r ?? null };
           } catch (e) { return reply(502, { error: (e && e.message) || String(e), code: e && e.code }); }
+        }],
+
+        // ---- antenna alignment ----------------------------------------------
+        // A spot measurement, not a meter: one press fires a BURST of pings ~1.2 s apart
+        // and averages them, because a single ping jitters ~0.7 dB at a fixed position.
+        // A reply takes ~16 s, so a burst is tens of seconds — the response here returns
+        // as soon as the pings are away; watch the `align` event for the result.
+        //
+        // Everything derived (quality 0-100, band label, colour class, trend, best,
+        // gapToBest, bar heights) is computed SERVER-SIDE and pushed complete. A consumer
+        // renders the model and computes nothing.
+        ['GET', '/align', async () => mesh.alignState()],
+        ['POST', '/align/ping', async ({ body }) => {
+          if (!body || !body.target) return reply(400, { error: 'need {target, n?}  n = 1..5, default 4' });
+          try {
+            const r = await mesh.alignPing(body.target, body.n);
+            return r.ok ? { ...r, model: mesh.alignState() } : reply(409, r);
+          } catch (e) { return reply(502, { error: (e && e.message) || String(e), code: e && e.code }); }
+        }],
+        ['POST', '/align/stop', async () => ({ ...mesh.alignStop(), model: mesh.alignState() })],
+        // The operator's reply-wait period. Server-owned and PERSISTED: a weak node can
+        // answer at 18-43 s, longer than a fixed window would allow.
+        ['POST', '/align/config', async ({ body }) => {
+          if (!body || body.replyWindowSec == null) return reply(400, { error: 'need {replyWindowSec} (5..120)' });
+          return mesh.alignConfig({ replyWindowSec: body.replyWindowSec });
         }],
 
         // ---- config: the device's SELF-DESCRIBING field table -----------------

@@ -116,6 +116,7 @@ class Gateway {
         portnum: e.portnum,
         payload: Buffer.from(e.payload_b64 || '', 'base64'),
         from: this._from(e),
+        addr: e.addr || null,
         raw: e,
       };
     }
@@ -127,6 +128,11 @@ class Gateway {
         channel: e.channel,
         packetId: e.packet_id,
         replyId: (e.data && e.data.reply_id) != null ? e.data.reply_id : null,
+        // The RECEIVING radio (mesh-gw emits one event per reporting BLE device, so one
+        // packet heard by both antennas arrives twice with different `addr`). Needed to
+        // tell "the Yagi heard it at X" from "the omni heard it at Y" — without this,
+        // per-radio signal quality cannot be computed at all.
+        addr: e.addr || null,
         raw: e,
       };
     }
@@ -150,6 +156,8 @@ class Gateway {
       kind: 'heard', from: '!' + (pkt.from >>> 0).toString(16), portnum: dec.portnum || null,
       rssi: pkt.rx_rssi != null ? pkt.rx_rssi : null,
       snr: pkt.rx_snr != null ? pkt.rx_snr : null,
+      addr: e.addr || null,          // which of OUR radios reported it
+      replyId: dec.reply_id != null ? dec.reply_id : null,
     };
   }
 
@@ -187,6 +195,14 @@ class Gateway {
   async nodes(gwId) {
     const r = await fetch(`http://${this.host}:${this.sendPort}/${gwId}/nodes`);
     if (!r.ok) throw new MeshError(`gateway nodes failed: ${r.status}`, 'EGWREAD');
+    return r.json();
+  }
+
+  // The BLE radios mesh-gw is connected to: {devices:[{addr, node_id, ...}]}. Gateway-wide,
+  // not per-node — it is how we learn which physical antenna reported a packet.
+  async devices() {
+    const r = await fetch(`http://${this.host}:${this.sendPort}/devices`);
+    if (!r.ok) throw new MeshError(`gateway devices failed: ${r.status}`, 'EGWREAD');
     return r.json();
   }
 

@@ -19,6 +19,7 @@ const { Model } = require('./lib/model');
 const { Images } = require('./lib/images');
 const { Config } = require('./lib/config');
 const { Butler } = require('./lib/butler');
+const { Align } = require('./lib/align');
 const { Notifier } = require('./lib/notify');
 const { Daemon } = require('./lib/daemon');
 const log = require('./lib/log').log.child('mesh');
@@ -55,6 +56,11 @@ class Mesh extends EventEmitter {
     // because _onEvent -> _markOurs can run on any instance and must never depend on
     // connect() having populated it. connect() SEEDS it from config + disk.
     this._ours = new Set();
+    this._radioAddrs = new Map();   // BLE addr -> node id, filled from mesh-gw /devices
+    // Align is constructed HERE for the same reason: _onEvent routes pongs into it, and
+    // that must not depend on connect() having run. connect() supplies the real deps —
+    // until then it has no session, so every hook is a no-op.
+    this.align = new Align({ addrOf: (addr) => this._radioAddrs.get(addr) || null });
   }
 
   // ---- lifecycle ----
@@ -75,6 +81,19 @@ class Mesh extends EventEmitter {
       send: (node, text) => this._sendRaw(node, text),   // fire-and-forget control via the DM path
     });
     this.images.emit = (type, payload) => this.emit(type, payload);
+    // Antenna alignment. Sends its pings through gw.sendText DIRECTLY, deliberately
+    // bypassing the request ledger: 4 pings per press is instrument traffic, and it would
+    // drown the outbox that exists to show a person what THEY sent. Same reasoning that
+    // keeps chunk transfer out of it.
+    Object.assign(this.align, {
+      send: (text, opts) => this.gw.sendText(this.gwId, text, opts),
+      radios: (this.cfg.align && this.cfg.align.radios) || {},
+      channel: this.channel,
+      cache: this.images && this.images.store && this.images.store.cache,
+      log: require('./lib/log').log.child('align'),
+      onChange: (view) => this.emit('align', view),
+    });
+
     this.config = new Config({
       command: (node, verb, args) => this.command(node, verb, args, this._idem()),   // config/chunk cfg/name are idempotent
       send: (node, text) => this._sendRaw(node, text),      // `sch` pages: fire-and-forget over the DM path
@@ -117,6 +136,7 @@ class Mesh extends EventEmitter {
     log.debug('connecting to gw %s (gwId %s, channel %d)', this.cfg.gw.host, this.gwId, this.channel);
     await this.gw.connect();
     await this._refreshRoster();   // seed target->num; refreshed lazily on a resolver miss
+    await this._refreshRadios();   // BLE addr -> node id, so align can label yagi vs omni
     return this;
   }
 
@@ -128,12 +148,23 @@ class Mesh extends EventEmitter {
       // A unit transmitted → its wake window is open. Record last-heard (live/dev mode),
       // cue the butler, and surface for consumers.
       this.model.heard(ev.from, Date.now());
+      // Per-RADIO envelope for an alignment ping: OUR antennas hearing the device. One
+      // such event per receiving radio, which is the only place yagi_q/omni_q can come
+      // from. Ignored unless a session is running and the reply_id matches.
+      if (ev.replyId != null) this.align.onEnvelope(ev.replyId, ev.addr, ev.rssi, ev.snr);
       this.emit('heard', { from: ev.from, portnum: ev.portnum, rssi: ev.rssi, snr: ev.snr });
       return;
     }
     if (ev.kind === 'text') {
       const reply = protocol.parseReply(ev.text);
-      if (reply) { this.timing.onReply(reply, ev.replyId); this.emit('reply', reply, ev.from); }
+      if (reply) {
+        // A pong may be an alignment measurement. Offered to align FIRST because align
+        // needs the per-radio `addr`, which nothing downstream carries — but it is only
+        // consumed if a session is running and the reply_id matches an outstanding ping,
+        // so normal command traffic is unaffected.
+        if (reply.type === 'pong') this.align.onPong(reply, ev.replyId, ev.addr);
+        this.timing.onReply(reply, ev.replyId); this.emit('reply', reply, ev.from);
+      }
       // Not our JSON protocol => a HUMAN message. Previously dropped on the floor,
       // which meant an operator texting the mesh was invisible to this service.
       // Surfaced as 'text' so a console/chat consumer can see it; deliberately NOT
@@ -463,6 +494,41 @@ class Mesh extends EventEmitter {
     return this.butler.enqueue(await this._unitKey(target), verb, args, opts);
   }
   async queueList(target) { return this.butler.list(target ? await this._unitKey(target) : undefined); }
+
+  // ---- antenna alignment -----------------------------------------------------
+  // Which of OUR radios reported a packet. mesh-gw identifies a receiving device by BLE
+  // `addr`; the config names radios by node id (an id survives a MAC change, and keeps
+  // identity out of code). This maps one to the other.
+  async _refreshRadios() {
+    try {
+      const j = await this.gw.devices();
+      for (const d of (j && j.devices) || []) if (d.addr && d.node_id) this._radioAddrs.set(d.addr, d.node_id);
+      log.debug('align: %d radio address(es) mapped', this._radioAddrs.size);
+    } catch (e) { log.debug('align: radio map unavailable: %s', e && e.message); }
+    return this._radioAddrs;
+  }
+
+  // One press = one burst of N pings, averaged into a single reading. Opens or retargets
+  // the session as needed, exactly as the original did.
+  async alignPing(target, n) {
+    const r = await this._resolve(target);
+    if (r.num == null) throw new MeshError(`align: cannot resolve target ${target}`, 'ETARGET');
+    const s = this.align.session;
+    if (!s || s.num !== r.num) {
+      // Label the transmitting radio for the view. The configured gateway is what we send
+      // through; it is reported to the UI, never chosen by it.
+      const label = Object.entries((this.cfg.align && this.cfg.align.radios) || {})
+        .find(([, id]) => id === this.gwId);
+      this.align.start({ num: r.num, txLabel: (label && label[0] || 'gateway').toUpperCase(), channel: this.channel });
+    }
+    return this.align.ping(n);
+  }
+  alignStop() { return this.align.stop(); }
+  alignState() { return this.align.view(); }
+  alignConfig({ replyWindowSec } = {}) {
+    if (replyWindowSec != null) this.align.setReplyWindowSec(replyWindowSec);
+    return this.align.view();
+  }
 
   // The outbox, queried. Reads the LEDGER rather than the butler's in-memory mirror, so
   // it sees settled history too — the butler only holds what it is still working on.
