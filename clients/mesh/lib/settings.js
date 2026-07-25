@@ -83,19 +83,34 @@ function find(opts = {}) {
 }
 
 // Resolve config from DEFAULTS < file < env < opts.
+//
+// EMBEDDED USE — opts.config: when the caller passes a config OBJECT, it is used
+// verbatim over DEFAULTS and **the filesystem and environment are not consulted at
+// all**. That is the whole point: inside the single-service host, cwd belongs to the
+// HOST, so the file search below (cwd/config.yaml, then this module's OWN shipped
+// config.yaml) would silently resolve to the wrong file — quietly inheriting some
+// other unit's gatewayId/channel. A host hands each module its slice; a module that
+// reads the disk behind the host's back is a bug, not a convenience.
+// Explicit programmatic opts (gw/channel/...) still apply on top.
 function load(opts = {}) {
   const cfg = JSON.parse(JSON.stringify(DEFAULTS)); // deep copy (plain data)
 
-  const file = find(opts);
-  if (file) {
-    let parsed;
-    try { parsed = YAML.parse(fs.readFileSync(file, 'utf8')); }
-    catch (e) { throw new Error(`config.yaml parse error (${file}): ${e.message}`); }
-    if (isPlainObject(parsed)) deepMerge(cfg, parsed);
+  const injected = isPlainObject(opts.config);
+  if (injected) {
+    deepMerge(cfg, opts.config);
+  } else {
+    const file = find(opts);
+    if (file) {
+      let parsed;
+      try { parsed = YAML.parse(fs.readFileSync(file, 'utf8')); }
+      catch (e) { throw new Error(`config.yaml parse error (${file}): ${e.message}`); }
+      if (isPlainObject(parsed)) deepMerge(cfg, parsed);
+    }
   }
 
-  // env overrides (small, documented set)
-  const env = process.env;
+  // env overrides (small, documented set) — skipped entirely for injected config so
+  // an embedded module is deterministic: what the host passed is what it gets.
+  const env = injected ? {} : process.env;
   if (env.MTMESH_GW) applyGw(cfg, env.MTMESH_GW);
   if (env.MTMESH_GATEWAY_ID) cfg.gw.gatewayId = env.MTMESH_GATEWAY_ID;
   if (env.MTMESH_CHANNEL) cfg.channel = Number(env.MTMESH_CHANNEL);
