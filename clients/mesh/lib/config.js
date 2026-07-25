@@ -5,9 +5,10 @@
 //
 // Transport is injected (config.js owns no addressing): `command` for text-reply
 // verbs (config, chunk cfg) and `send` (DM-aware, fire-and-forget) for `sch` pages,
-// whose reply is a port-260 app frame delivered back via onSchemaFrame(), not a text
+// The SCHEMA is no longer pulled over the air at all — it is a file generated at
 // reply. Addressing (target->num, DM vs fallback) lives in mesh-dm; we just pass a node.
 'use strict';
+const fs = require('fs');
 const { MeshError } = require('./errors');
 
 // field -> text-command mapping. The device's uniform {type:set} channel (PRIVATE_APP
@@ -72,45 +73,12 @@ class Config {
     this.command = deps.command;                 // (node,verb,args) => text reply object
     this.send = deps.send;                       // (node,text) => fire-and-forget (DM path)
     this.log = deps.log || { debug() {}, info() {}, warn() {} };
-    this.schemaTimeoutMs = deps.schemaTimeoutMs || 8000;
-    this.store = deps.store || null;             // persists the schema across restarts
+    this.store = deps.store || null;             // persists payloads; no longer used for schema
+    // The schema comes from a FILE generated at firmware build time (schema.file), never
+    // from the radio. It is static per build, so there is nothing to pull and nothing to
+    // cache across restarts beyond the hot map below.
+    this.schemaFile = deps.schemaFile || null;
     this._schema = new Map();                    // node -> { ver, fields:[...] } (hot cache)
-    this._pending = new Map();                   // node -> Map(page -> resolve)
-  }
-
-  // Called by Mesh._onEvent for a port-260 frame with obj.t === 'sch'.
-  // The `sch` reply is a BROADCAST (and may be rebroadcast), so its `from` is often a
-  // relay, not the target we addressed — and the schema is firmware-global (identical
-  // across units). So route by PAGE to the in-flight pull rather than matching `from`.
-  // First matching waiter wins; duplicate frames from other units find none and are ignored.
-  onSchemaFrame(from, obj) {
-    if (!obj || obj.t !== 'sch') return;
-    for (const pend of this._pending.values()) {
-      const r = pend.get(obj.p);
-      if (r) { pend.delete(obj.p); r(obj); return; }
-    }
-  }
-
-  // Pull one page, RESENDING `sch <page>` every perTry ms until it arrives or the
-  // total budget runs out — a `sch` reply is a fire-and-forget broadcast, so a single
-  // lost frame must not kill the whole pull (the link to the alarm can be marginal).
-  _pullPage(node, page) {
-    return new Promise((resolve, reject) => {
-      let pend = this._pending.get(node);
-      if (!pend) { pend = new Map(); this._pending.set(node, pend); }
-      const perTry = Math.min(2500, this.schemaTimeoutMs);
-      const tries = Math.max(1, Math.ceil(this.schemaTimeoutMs / perTry));
-      let attempt = 0, timer = null, done = false;
-      const finish = (fn, arg) => { if (done) return; done = true; if (timer) clearTimeout(timer); pend.delete(page); fn(arg); };
-      pend.set(page, (obj) => finish(resolve, obj));
-      const tick = () => {
-        if (done) return;
-        if (attempt++ >= tries) return finish(reject, new MeshError(`schema: page ${page} timed out`, 'ESCHEMA'));
-        Promise.resolve(this.send(node, `sch ${page}`)).catch(() => { /* keep retrying */ });
-        timer = setTimeout(tick, perTry);
-      };
-      tick();
-    });
   }
 
   // ---- schema: the device's own field table (pull-paginated, cached) ----------
@@ -125,49 +93,40 @@ class Config {
   // If the device cannot be reached we RETURN THE CACHE rather than throwing, flagged
   // `stale: true` so the caller can say "from cache" instead of showing an error.
   async schema(node, { refresh = false } = {}) {
+    // THE SCHEMA IS A FILE, NEVER RADIO TRAFFIC. It is static per firmware build, so
+    // pulling it over LoRa was always the wrong mechanism — 20 fields at 3 per page is
+    // SEVEN request/response round trips at 30-90 s each, and it never once completed.
+    // Generated at firmware build time from CONFIG_FIELDS (tools/gen_schema.py), so it
+    // cannot drift from what applySet() validates against.
     if (!refresh) {
       const hot = this._schema.get(node);
       if (hot) return hot;
-      const disk = this.store && this.store.loadSchema(node);
-      if (disk && Array.isArray(disk.fields)) {
-        this._schema.set(node, disk);
-        return disk;
-      }
+    }
+    const file = this.schemaFile;
+    if (!file) throw new MeshError('config: schema.file is not configured — declare it in settings.js', 'ECONFIG');
+
+    let raw;
+    try { raw = fs.readFileSync(file, 'utf8'); }
+    catch (e) {
+      throw new MeshError(`schema file unreadable (${file}): ${e.message}. It is generated `
+        + 'by the firmware build (tools/gen_schema.py) — build the firmware to produce it.', 'ESCHEMAFILE');
+    }
+    let doc;
+    try { doc = JSON.parse(raw); }
+    catch (e) { throw new MeshError(`schema file is not valid JSON (${file}): ${e.message}`, 'ESCHEMAFILE'); }
+    if (!doc || !Array.isArray(doc.fields) || !doc.fields.length) {
+      throw new MeshError(`schema file has no fields (${file}) — refusing to serve an empty schema`, 'ESCHEMAFILE');
     }
 
-    this._pending.set(node, new Map());
-    try {
-      const rows = [];
-      let ver = 1, total = 1;
-      for (let p = 0; p < total; p++) {
-        const frame = await this._pullPage(node, p);
-        if (frame.v != null) ver = frame.v;
-        if (frame.n != null) total = frame.n;
-        const f = Array.isArray(frame.f) ? frame.f : [];
-        for (let i = 1; i < f.length; i++) rows.push(f[i]);   // skip the header row on each page
-      }
-      const schema = { ver, fields: rows.map(parseRow).filter(Boolean), fetchedAt: Date.now() };
-      this._schema.set(node, schema);
-      if (this.store) {
-        try { this.store.saveSchema(node, schema); }
-        catch (e) { this.log.warn('schema persist failed: %s', e && e.message); }
-      }
-      return schema;
-    } catch (e) {
-      // Unreachable. Fall back to ANY persisted schema — it is firmware-global, so a
-      // sibling unit's copy describes this one too. Better a flagged stale form than
-      // no form at all; the alternative is a dashboard that is blank until the unit
-      // next wakes.
-      const disk = (this.store && this.store.loadSchema(node))
-        || (this.store && this.store.anySchemas()[0]) || null;
-      if (disk && Array.isArray(disk.fields)) {
-        this.log.info('schema: %s unreachable, serving cached ver %s', node, disk.ver);
-        return { ...disk, stale: true, error: (e && e.message) || String(e) };
-      }
-      throw e;                       // nothing cached anywhere: the caller gets the 504
-    } finally {
-      this._pending.delete(node);
-    }
+    const schema = {
+      ver: doc.ver != null ? doc.ver : 1,
+      fw: doc.fw != null ? doc.fw : null,
+      fields: doc.fields,
+      source: 'file',
+      fetchedAt: Date.now(),
+    };
+    this._schema.set(node, schema);
+    return schema;
   }
 
   // ---- get: compose the available device reads into a flat values map ---------
@@ -199,8 +158,17 @@ class Config {
     f = FALLBACK_FIELDS[field];
     if (f) return f;
     let schema = null;
+    // The schema being unavailable must DEGRADE to the built-in bounds, never fail the
+    // write outright — that is what FALLBACK_FIELDS is for. Previously this caught only
+    // the over-air 'ESCHEMA'; the file path raises ESCHEMAFILE (missing/corrupt file) or
+    // ECONFIG (schema.file not declared), and those were propagating instead of falling
+    // back, turning a degraded case into a hard failure.
+    const SCHEMA_UNAVAILABLE = new Set(['ESCHEMA', 'ESCHEMAFILE', 'ECONFIG']);
     try { schema = await this.schema(node); }
-    catch (e) { if (e.code !== 'ESCHEMA') throw e; this.log.warn('device schema unavailable (%s)', e.message); }
+    catch (e) {
+      if (!SCHEMA_UNAVAILABLE.has(e.code)) throw e;
+      this.log.warn('config schema unavailable (%s) — falling back to built-in bounds', e.message);
+    }
     f = schema && schema.fields.find((x) => x.id === field);
     if (!f) throw new MeshError(schema ? `unknown field ${field}` : `field ${field} needs the device schema (unavailable)`, 'EFIELD');
     return f;

@@ -30,7 +30,7 @@ class Images {
     this.log = deps.log || { debug() {}, info() {}, warn() {} };
     this.command = deps.command;                 // (node,verb,args) => reply
     this.send = deps.send;                        // (node, text) => fire-and-forget over the DM path
-    this.store = new PayloadStore({ dir: (this.cfg.paths && this.cfg.paths.store) || './payloads' });
+    this.store = new PayloadStore({ query: (this.cfg && this.cfg.store) || {}, dir: (this.cfg.paths && this.cfg.paths.store) || './payloads' });
     this.active = new Map();                      // pid -> { rx, node, aborted, promise }
     this.listening = false;
     this.emit = () => {};                          // installed by Mesh
@@ -59,7 +59,7 @@ class Images {
     const existing = this.active.get(pid);
     if (existing) return existing;
     const T = this.cfg.timing || {};
-    const idleMs = T.pushIdleMs != null ? T.pushIdleMs : 35000; // proven push idle
+    const idleMs = T.pushIdleMs; // proven push idle (timing.pushIdleMs)
     const entry = { rx: new PushReceiver(pid, { idleMs, actMs: T.pushActMs, quietMs: T.pushQuietMs }), node, aborted: false };
     this.active.set(pid, entry);
     entry.promise = this._drive(entry, opts).finally(() => this.active.delete(pid));
@@ -105,8 +105,8 @@ class Images {
     const { rx, node } = entry;
     const pid = rx.pid;
     const T = this.cfg.timing || {};
-    const pollMs = T.pushPollMs != null ? T.pushPollMs : 1000;
-    const deadline = Date.now() + (T.pushDeadlineMs != null ? T.pushDeadlineMs : 900000);
+    const pollMs = T.pushPollMs;
+    const deadline = Date.now() + T.pushDeadlineMs;
     const PROTO = this.protocol.PROTO_VERSION;
     const startedAt = Date.now();
     let outcome = null, bytes = 0;   // captured for the per-pid stats record (finally)
@@ -222,12 +222,15 @@ class Images {
   // Capture a fresh photo then fetch it. `cam grab` is answered by the device PUBLISHING
   // the new image (not a text reply), so we fire it and poll list() until a NEW pid is
   // ready, then get() it. This is the flow that verified the pipeline live (pid 60780).
-  async grab(node, { pollMs = 2000, timeoutMs = 30000 } = {}) {
+  async grab(node, { pollMs, timeoutMs } = {}) {
+    const T = (this.cfg && this.cfg.timing) || {};
+    pollMs = pollMs != null ? pollMs : T.grabPollMs;
+    timeoutMs = timeoutMs != null ? timeoutMs : T.grabTimeoutMs;
     // Cap each poll: list() carries the idempotent retry, which can block for tens of
     // seconds on a congested link — a single slow poll must not stall the whole grab.
     const listOnce = () => Promise.race([
       this.list(node).catch(() => null),
-      new Promise((r) => setTimeout(() => r(null), 4000)),
+      new Promise((r) => setTimeout(() => r(null), ((this.cfg && this.cfg.timing) || {}).grabAckMs)),
     ]);
     const before = (await listOnce()) || {};
     await this.send(node, 'cam grab');                       // trigger capture (fire-and-forget)

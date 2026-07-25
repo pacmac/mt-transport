@@ -5,6 +5,7 @@
 'use strict';
 const assert = require('assert');
 const { Config } = require('../lib/config');
+const SCHEMA_FILE = require('../lib/settings').load({ config: {} }).schema.file;
 
 let pass = 0;
 const ok = (c, m) => { assert(c, m); pass++; };
@@ -44,7 +45,8 @@ function makeDevice() {
   const counts = { command: 0, send: 0, chunkWrites: 0 };
   const cfg = new Config({
     log: { debug() {}, info() {}, warn() {} },
-    schemaTimeoutMs: 500,
+    // The schema is a FILE generated at firmware build time — never pulled over the air.
+    schemaFile: SCHEMA_FILE,
     command: async (node, verb, args = []) => {
       counts.command++;
       if (verb === 'config') return { type: 'config', ver: 1, beat: 60, txp: 22, slp: 0, det: { n: 3, win: 10 }, alm: { on: 1, ovr: 60, und: 2, hum: 90, ren: 30 } };
@@ -66,30 +68,32 @@ function makeDevice() {
       }
       return {};
     },
-    send: async (node, text) => {
-      counts.send++;
-      const m = text.match(/sch (\d+)/);
-      if (m) setImmediate(() => cfg.onSchemaFrame(node, pageFrame(Number(m[1]))));
-      return { id: 1 };
-    },
+    send: async () => { counts.send++; return { id: 1 }; },
   });
   return { cfg, state, counts };
 }
 
 (async () => {
-  // ---- 1. schema: assembles all 18 fields, bounds correct, and caches ---------
+  // ---- 1. schema comes from the FILE, and costs NO AIRTIME --------------------
+  // It used to be 7 request/response round trips at 30-90 s each for data that is static
+  // per firmware build, and it never once completed. The zero-airtime assertion is the
+  // one that matters: if it ever transmits again, this fails.
   {
     const { cfg, counts } = makeDevice();
     const s = await cfg.schema('b80f');
-    ok(s.fields.length === 20, `schema: 20 fields (got ${s.fields.length})`);
+    ok(s.fields.length === 20, `schema: 20 fields from the file (got ${s.fields.length})`);
+    ok(s.source === 'file', 'schema: served from the file, not the radio');
+    ok(typeof s.fw === 'string' && s.fw.length, 'schema: states which firmware build it describes');
     const gap = s.fields.find((f) => f.id === 'chunk.gap');
     ok(gap && gap.ty === 'n' && gap.min === 0 && gap.max === 60000 && gap.writable, 'schema: chunk.gap bounds 0..60000, writable');
     const txp = s.fields.find((f) => f.id === 'txp');
     ok(txp && !txp.writable && !txp.bounded, 'schema: txp read-only + unbounded');
-    const sendsAfterFirst = counts.send;
-    await cfg.schema('b80f');                       // cached
-    ok(counts.send === sendsAfterFirst, 'schema: second call is cached (0 new sends)');
-    ok(sendsAfterFirst === NPAGES, `schema: pulled ${NPAGES} pages`);
+    const name = s.fields.find((f) => f.id === 'name');
+    ok(name && name.ty === 't' && name.def === '' && name.min === 1 && name.max === 4,
+       'schema: a TEXT field has an empty-string default and LENGTH bounds');
+    ok(counts.send === 0 && counts.command === 0, 'schema: ZERO airtime — nothing was transmitted');
+    await cfg.schema('b80f');
+    ok(counts.send === 0, 'schema: still zero after a second call');
   }
 
   // ---- 2. get: composes config + chunk cfg, honest unread ---------------------
@@ -138,7 +142,7 @@ function makeDevice() {
   {
     const state = { hop: 1, gap: 3000, on: 1, sec: 60 };
     const counts = { chunkWrites: 0 };
-    const cfg = new Config({
+    const cfg = new Config({ schemaTimeoutMs: 60000, schemaRetryMs: 2500,
       log: { debug() {}, info() {}, warn() {} },
       schemaTimeoutMs: 300,                       // short: schema pull will fail fast
       command: async (node, verb, args = []) => {

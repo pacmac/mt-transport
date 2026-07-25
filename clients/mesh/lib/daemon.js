@@ -101,7 +101,7 @@ class Daemon {
         ws.on('error', () => this._clients.delete(ws));
       });
       this._server.once('error', reject);
-      this._server.listen(d.port != null ? d.port : 8787, d.host || '127.0.0.1', () => resolve());
+      this._server.listen(d.port, d.host, () => resolve());   // daemon.{port,host} — declared in settings
     });
   }
 

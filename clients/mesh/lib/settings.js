@@ -15,9 +15,54 @@ const DEFAULTS = Object.freeze({
   channel: 2, // never 0
   logLevel: 'info', // silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides. See lib/log.js.
   paths:   { store: './payloads', log: './mtmesh.log' },
-  timing:  { sendSpacingMs: 3000, replyTimeoutMs: 20000, wsMaxPayload: 0,
-             chunkAnswerMs: 8000, idleMs: 240000, pushDeadlineMs: 900000,
-             pushQuietMs: 15000 }, // post-stream quiet wait before PROGRESS_Q; must exceed device max inter-chunk gap (~9s)
+  // Ledger query paging — declared rather than baked into store.js.
+  store:   { defaultLimit: 200, maxLimit: 1000 },   // ledger query paging
+  // The config schema is a FILE generated at firmware build time from CONFIG_FIELDS —
+  // static per build, and NEVER pulled over the radio (that was 7 round trips for data
+  // that cannot change between builds). Path is config, never hardcoded.
+  schema:  { file: '/usr/share/pac/dev/pio/projects/pac-garage-alarm/docs/config-schema.json' },
+  // EVERY timeout, delay, interval and cap lives HERE and nowhere else. No inline
+  // `|| 8000` fallbacks, no module-level constants — an undeclared value is one nobody
+  // knows they can change, and that cost a whole day: the schema pull silently gave up at
+  // 8 s (borrowed from chunkAnswerMs) while the device answered at 31-46 s.
+  // Grouped by what the wait is physically FOR, not by which file uses it.
+  timing:  {
+    sendSpacingMs:    3000,    // gap between OUR transmissions
+    replyTimeoutMs:   20000,   // a device TEXT reply
+    wsMaxPayload:     0,
+    chunkAnswerMs:    8000,    // a 260/261 FRAME answer (chunk) — NOT the schema, see below
+    idleMs:           240000,
+    grabTimeoutMs:    30000,   // camera grab, overall
+    grabPollMs:       2000,
+    grabAckMs:        4000,    // was a bare setTimeout(...,4000)
+    pushIdleMs:       35000,   // proven push idle
+    pushActMs:        4000,    // spacing once the DEVICE has said where it is
+    pushQuietMs:      15000,   // post-stream quiet before PROGRESS_Q; must exceed the
+                               //   device max inter-chunk gap (~9s)
+    pushPollMs:       1000,
+    pushDeadlineMs:   900000,
+    pushMaxStale:     8,
+    pushMaxUnanswered: 30,
+    reconnectMs:      5000,    // SHARED by gw + recorder: reconnecting to a local service
+                               //   is one concept; duplicating it invites drift
+    keepaliveMs:      25000,   // SSE comment frame, keeps idle proxies from closing us
+    silenceCheckMs:   30000,   // recorder's silence check period
+  },
+  // Alignment measurement. Ported constants are still config — a ported value is not
+  // exempt from the rule.
+  align:   {
+    collectMs:        1200,    // gather both radios' copies of one pong
+    burstSpacingMs:   1200,    // between pings in a burst (just over collectMs, so each
+                               //   ping is a genuinely separate attempt)
+    replyWindowSec:   30,
+    replyWindowMinSec: 5,
+    replyWindowMaxSec: 120,
+    burstMin:         1,
+    burstMax:         5,
+    burstDefault:     4,
+    radios:           {},
+  },
+  butler:  { ttlMs: 86400000, maxTries: 5, maxPending: 10 },
   retry:   { commands: false, idempotent: 2, attemptTimeoutMs: 10000 }, // resend known-idempotent domain cmds; per-attempt reply wait
   // Directed PKC DM (to:num, channel 0) is the DEFAULT send; the private channel is the
   // fallback (num unknown / '*' / DM disabled). omitAddress keeps the legacy @<target>
@@ -34,7 +79,7 @@ const DEFAULTS = Object.freeze({
   // "is this ours". Declaring a device here keeps it in GET /devices even while it is
   // asleep and has never been heard. The other half is learned from 260/261 traffic.
   devices: {},
-  mode:    { silentMs: 150000 },
+  mode:    { silentMs: 150000 },   // "not heard this long => assume asleep" 
   listen:  { autoFetchImages: true, alerts: ['motion', 'fault'] },
   daemon:  { serve: false, host: '127.0.0.1', port: 8787 }, // opt-in read-only domain HTTP+WS surface
   notify:  { transports: { console: { enabled: true } }, routes: {} },

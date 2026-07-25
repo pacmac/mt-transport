@@ -21,6 +21,12 @@ timing:
   idleMs: 240000
   pushDeadlineMs: 900000
   pushQuietMs: 15000
+# The config schema is a FILE generated at firmware build time from CONFIG_FIELDS
+# (pac-garage-alarm/tools/gen_schema.py) and served instantly — it is STATIC per build and
+# is NEVER pulled over the radio. The old over-air pull was 7 round trips at 30-90s each.
+schema:
+  file: /usr/share/pac/dev/pio/projects/pac-garage-alarm/docs/config-schema.json
+
 # Command butler. maxPending is a HARD ceiling on UNDELIVERED commands per unit: nothing
 # normal queues ten at one radio (the largest real backlog seen is 1), so hitting it means
 # a caller is looping — treat it as a bug signal, not a limit to raise. Identical pending

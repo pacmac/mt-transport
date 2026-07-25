@@ -26,17 +26,31 @@
 
       "dm": { "default": true, "fallbackChannel": 2, "omitAddress": false },
 
+      "_timing_comment": "EVERY timeout/delay/interval/cap is declared HERE. No inline fallbacks, no constants in code. There is no schema timeout: the schema is a file, not radio traffic.",
       "timing": {
         "sendSpacingMs": 3000,
         "replyTimeoutMs": 20000,
         "wsMaxPayload": 0,
         "chunkAnswerMs": 8000,
         "idleMs": 240000,
+        "grabTimeoutMs": 30000,
+        "grabPollMs": 2000,
+        "grabAckMs": 4000,
+        "pushIdleMs": 35000,
+        "pushActMs": 4000,
+        "pushQuietMs": 15000,
+        "pushPollMs": 1000,
         "pushDeadlineMs": 900000,
-        "pushQuietMs": 15000
+        "pushMaxStale": 8,
+        "pushMaxUnanswered": 30,
+        "reconnectMs": 5000,
+        "keepaliveMs": 25000,
+        "silenceCheckMs": 30000
       },
-      "butler": { "maxPending": 10 },
-
+      "store": { "defaultLimit": 200, "maxLimit": 1000 },
+      "_schema_comment": "The config schema is a FILE generated at firmware build time from CONFIG_FIELDS and served instantly. STATIC per build, NEVER pulled over the radio \u2014 the old over-air pull was 7 round trips at 30-90s each and never once completed.",
+      "schema": { "file": "/usr/share/pac/dev/pio/projects/pac-garage-alarm/docs/config-schema.json" },
+      "butler": { "ttlMs": 86400000, "maxTries": 5, "maxPending": 10 },
       "retry": { "commands": false, "idempotent": 2, "attemptTimeoutMs": 10000 },
       "listen": { "autoFetchImages": true, "alerts": ["motion", "fault"] },
 
@@ -45,7 +59,12 @@
         "routes": { "motion": ["console"], "fault": ["console"] }
       },
 
-      "align": { "radios": { "omni": "!2687afb1", "yagi": "!fa39f7b4" } },
+      "align": {
+        "collectMs": 1200, "burstSpacingMs": 1200,
+        "replyWindowSec": 30, "replyWindowMinSec": 5, "replyWindowMaxSec": 120,
+        "burstMin": 1, "burstMax": 5, "burstDefault": 4,
+        "radios": { "omni": "!2687afb1", "yagi": "!fa39f7b4" }
+      },
 
       "_devices_comment": "OUR alarm devices — the DECLARED half of the device registry behind GET /v1/mesh/devices. Distinct from 'units' below, which only holds live/dev overrides and so cannot answer 'is this ours'. Declaring a unit keeps it in the device list while it is ASLEEP; the other half is learned from 260/261 traffic and persisted. The gateway !2687afb1 is deliberately absent: it is our radio, not one of our devices.",
       "devices": {

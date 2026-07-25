@@ -16,16 +16,16 @@
 //     antennas hearing the device. Secondary; yields yagi_q/omni_q.
 'use strict';
 
-// Timing — from the source, which measured them. Reply latency mean 16.1 s, max 18.6 s,
-// ~75% land. Pings are spaced just OVER the collect window so each is a genuinely
-// separate attempt rather than a duplicate of the one before.
-const ALIGN_COLLECT_MS = 1200;
-const BURST_SPACING_MS = 1200;
-const N_MIN = 1, N_MAX = 5, N_DEFAULT = 4;
-const REPLY_WINDOW_DEFAULT_SEC = 30, REPLY_WINDOW_MIN = 5, REPLY_WINDOW_MAX = 120;
-
-const clampWindow = (s) => Math.max(REPLY_WINDOW_MIN, Math.min(REPLY_WINDOW_MAX, Math.round(Number(s) || REPLY_WINDOW_DEFAULT_SEC)));
-const clampN = (n) => Math.max(N_MIN, Math.min(N_MAX, Math.round(Number(n) || N_DEFAULT)));
+// Timing comes from config (`align.*`), NOT from constants here. These values were
+// measured by the original implementation — reply latency mean 16.1 s, max 18.6 s, ~75%
+// land, pings spaced just OVER the collect window so each is a genuinely separate attempt
+// — but a measured value is still a value that may need tuning against a real radio, and
+// a ported constant is not exempt from "every timeout is configurable".
+// The required config keys. There are deliberately NO defaults here — settings.js is the
+// only place a value may live, so a caller that forgets one gets a loud error rather than
+// a silent constant nobody knows about.
+const REQUIRED = ['collectMs', 'burstSpacingMs', 'replyWindowSec', 'replyWindowMinSec',
+                  'replyWindowMaxSec', 'burstMin', 'burstMax', 'burstDefault'];
 const round1 = (v) => (typeof v === 'number' && Number.isFinite(v)) ? Math.round(v * 10) / 10 : null;
 const mean = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : null);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -57,6 +57,9 @@ class Align {
   // deps: { send(text,{channel}) -> {id}, radios: {label -> nodeId}, addrOf(addr) -> nodeId,
   //         channel, cache, log, onChange(view) }
   constructor(deps = {}) {
+    // cfg is the resolved `align` block; DEFAULTS only fills gaps so a bare/stubbed
+    // instance still works (tests construct one directly).
+    this.cfg = deps.cfg || {};
     this.send = deps.send;
     this.radios = deps.radios || {};
     this.addrOf = deps.addrOf || (() => null);
@@ -69,12 +72,34 @@ class Align {
 
   // Operator-set and PERSISTED: a weak node can answer at 18–43 s, longer than a fixed
   // 20 s window that would discard those replies.
+  // Validated on USE, not construction: Mesh builds an Align before config is resolved so
+  // that _onEvent can route pongs on any instance. A missing value must still be a loud
+  // error rather than a silent NaN, so it is checked the moment the value is needed.
+  _requireCfg() {
+    for (const k of REQUIRED) {
+      if (!Number.isFinite(this.cfg[k])) {
+        throw new Error(`align: config align.${k} is required (got ${this.cfg[k]}) — declare it in settings.js`);
+      }
+    }
+    return this.cfg;
+  }
+
+  _clampWindow(s) {
+    const c = this._requireCfg();
+    return Math.max(c.replyWindowMinSec,
+      Math.min(c.replyWindowMaxSec, Math.round(Number(s) || c.replyWindowSec)));
+  }
+  _clampN(n) {
+    const c = this._requireCfg();
+    return Math.max(c.burstMin, Math.min(c.burstMax, Math.round(Number(n) || c.burstDefault)));
+  }
+
   replyWindowSec() {
     const v = this.cache ? this.cache.value('align', 'reply_window_sec') : null;
-    return clampWindow(v != null ? v : REPLY_WINDOW_DEFAULT_SEC);
+    return this._clampWindow(v != null ? v : this.cfg.replyWindowSec);
   }
   setReplyWindowSec(sec) {
-    const v = clampWindow(sec);
+    const v = this._clampWindow(sec);
     if (this.cache) this.cache.put('align', 'reply_window_sec', v);
     this._push();
     return v;
@@ -86,7 +111,7 @@ class Align {
     const s = this.session;
     if (!s) {
       return { kind: 'align', running: false, target: null, tx: null, channel: null,
-               nBurst: N_DEFAULT, replyWindowSec: this.replyWindowSec(),
+               nBurst: this.cfg.burstDefault, replyWindowSec: this.replyWindowSec(),
                burst: null, warning: null, best: null, current: null, readings: [] };
     }
     const rs = s.readings;
@@ -143,7 +168,7 @@ class Align {
     this.session = {
       num, suffix: hexSuffix(num), txLabel: txLabel || 'OMNI',
       channel: channel != null ? channel : this.channel,
-      nBurst: N_DEFAULT, readingCount: 0, readings: [], burst: null, warning: null,
+      nBurst: this.cfg.burstDefault, readingCount: 0, readings: [], burst: null, warning: null,
     };
     this.log.info('align: session on !%s (@%s) via %s ch%d',
       (Number(num) >>> 0).toString(16), this.session.suffix, this.session.txLabel, this.session.channel);
@@ -171,7 +196,7 @@ class Align {
     const s = this.session;
     if (!s) return { ok: false, error: 'no session' };
     if (s.burst) return { ok: false, error: 'burst in progress' };
-    const of = clampN(n);
+    const of = this._clampN(n);
     s.nBurst = of;
     const burst = { of, got: 0, done: 0, samples: [], pings: new Map(), deadlineTimer: null };
     s.burst = burst;
@@ -182,13 +207,13 @@ class Align {
     // never come sits "gathering" while its average is already good enough, and every
     // press is rejected as busy for the duration.
     burst.deadlineTimer = setTimeout(() => this._resolve(burst),
-      (of - 1) * BURST_SPACING_MS + this.replyWindowSec() * 1000);
+      (of - 1) * this.cfg.burstSpacingMs + this.replyWindowSec() * 1000);
     this._push();                       // button -> gathering 0/of
 
     for (let i = 0; i < of; i++) {
       if (this.session !== s || s.burst !== burst) return { ok: true, of };   // cancelled
       await this._sendPing(burst);
-      if (i < of - 1) await sleep(BURST_SPACING_MS);
+      if (i < of - 1) await sleep(this.cfg.burstSpacingMs);
     }
     return { ok: true, of };
   }
@@ -233,7 +258,7 @@ class Align {
     const label = this._labelFor(addr);
     if (label) ping.byRadio[label] = { rssi: payload.rxRssi != null ? payload.rxRssi : null, snr: payload.rxSnr != null ? payload.rxSnr : null };
     if (!ping.collectTimer) {
-      ping.collectTimer = setTimeout(() => this._finalizePing(s.burst, ping), ALIGN_COLLECT_MS);
+      ping.collectTimer = setTimeout(() => this._finalizePing(s.burst, ping), this.cfg.collectMs);
     }
   }
 
@@ -313,4 +338,4 @@ class Align {
   }
 }
 
-module.exports = { Align, signalQuality, qualityBand, clampN, clampWindow, N_DEFAULT };
+module.exports = { Align, signalQuality, qualityBand, REQUIRED };

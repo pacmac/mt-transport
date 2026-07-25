@@ -21,16 +21,16 @@ class Butler extends EventEmitter {
     this.store = deps.store;
     this.log = deps.log || { debug() {}, info() {}, warn() {} };
     const c = (deps.cfg && deps.cfg.butler) || {};
-    this.ttlMs = c.ttlMs != null ? c.ttlMs : 86400000;   // 24 h
+    this.ttlMs = c.ttlMs;                                 // butler.ttlMs
     // maxTries is the name now; maxAttempts is still accepted so an existing config.yaml
     // keeps working rather than silently reverting to the default.
-    this.maxTries = c.maxTries != null ? c.maxTries : (c.maxAttempts != null ? c.maxAttempts : 5);
+    this.maxTries = c.maxTries != null ? c.maxTries : c.maxAttempts;   // butler.maxTries
     // Hard ceiling on UNDELIVERED commands per unit. Nothing in normal operation queues
     // ten commands at one radio — the largest real backlog observed is 1 — so hitting this
     // is a BUG SIGNAL (a caller looping), not a capacity problem to be raised away.
     // Configurable because a limit that lives only in code is one nobody knows they can
     // change, and it would have to be found by reading source mid-incident.
-    this.maxPending = c.maxPending != null ? c.maxPending : 10;
+    this.maxPending = c.maxPending;                       // butler.maxPending
     this.inflight = new Set();                            // units mid-delivery (one per window)
     this._q = new Map();                                 // unit -> entries[] (mirror of the store)
     this._load();

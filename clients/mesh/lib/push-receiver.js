@@ -41,8 +41,9 @@ class PushReceiver {
    *                      dead — aborting a WORKING transfer is far worse than
    *                      taking ~4 min to notice a genuinely dead one.
    */
-  constructor(pid, { idleMs = 8000, maxStale = 8, maxUnanswered = 30,
-                     actMs = 4000, quietMs = 15000 } = {}) {
+  // All five come from config (timing.push*). No defaults here — an undeclared value is
+  // one nobody knows they can change.
+  constructor(pid, { idleMs, maxStale, maxUnanswered, actMs, quietMs } = {}) {
     // actMs: spacing once the DEVICE has told us where it is. The long idleMs is
     // for detecting silence we cannot otherwise explain; it must not also gate
     // the actions we take after the answer arrives.

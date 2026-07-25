@@ -9,7 +9,8 @@ const ok = (c, m) => { assert(c, m); pass++; };
 
 function mkMesh({ units = {}, silentMs = 150000 } = {}) {
   const m = new Mesh();
-  m.cfg = { units, mode: { silentMs }, retry: { idempotent: 2, attemptTimeoutMs: 10000 } };
+  m.cfg = { units, mode: { silentMs }, retry: { idempotent: 2, attemptTimeoutMs: 10000 },
+            timing: { replyTimeoutMs: 20000, sendSpacingMs: 3000 } };
   m.model = new Model();
   m._unitKey = async (t) => (String(t).startsWith('!') ? String(t) : '!' + t);
   m._cmdReliab = () => ({});

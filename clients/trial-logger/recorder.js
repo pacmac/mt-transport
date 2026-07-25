@@ -67,8 +67,8 @@ class Recorder {
   constructor(cfg = {}, log) {
     this.wsUrl = cfg.wsUrl || 'ws://localhost:8001/events';
     this.dataDir = cfg.dataDir || path.join(__dirname, 'data');
-    this.silenceCheckMs = cfg.silenceCheckMs != null ? cfg.silenceCheckMs : 30000;
-    this.reconnectMs = cfg.reconnectMs != null ? cfg.reconnectMs : 5000;
+    this.silenceCheckMs = cfg.silenceCheckMs;   // timing.silenceCheckMs
+    this.reconnectMs = cfg.reconnectMs;         // timing.reconnectMs (shared with gw)
     this.log = log || { info() {}, warn() {}, debug() {} };
     this.emit = null;            // set by start(); publishes to the host's event stream
 

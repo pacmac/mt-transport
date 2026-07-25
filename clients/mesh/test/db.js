@@ -10,6 +10,8 @@ const os = require('os');
 const path = require('path');
 const { openDb } = require('../lib/db');
 const { PayloadStore } = require('../lib/store');
+const _cfg = require('../lib/settings').load({ config: {} });
+
 
 let pass = 0;
 const ok = (c, m) => { assert(c, m); pass++; };
@@ -45,7 +47,7 @@ const entry = (o = {}) => ({
 // ---- round-trip through the store -----------------------------------------
 {
   const dir = tmp('rt');
-  const s = new PayloadStore({ dir });
+  const s = new PayloadStore({ query: _cfg.store, dir });
   s.saveQueue('!aa', [entry({ id: 'a1', verb: 'status', args: ['mem'] })]);
   const back = s.loadQueue('!aa');
   ok(back.length === 1, 'saveQueue/loadQueue round-trips');
@@ -73,9 +75,9 @@ const entry = (o = {}) => ({
 // ---- persistence across a restart -----------------------------------------
 {
   const dir = tmp('restart');
-  const s1 = new PayloadStore({ dir });
+  const s1 = new PayloadStore({ query: _cfg.store, dir });
   s1.saveQueue('!cc', [entry({ id: 'c1', verb: 'reboot' })]);
-  const s2 = new PayloadStore({ dir });               // simulates a service restart
+  const s2 = new PayloadStore({ query: _cfg.store, dir });               // simulates a service restart
   ok(s2.loadQueue('!cc').length === 1, 'ledger survives a restart');
   ok(s2.loadQueue('!cc')[0].verb === 'reboot', 'the queued instruction is intact');
   fs.rmSync(dir, { recursive: true, force: true });
@@ -84,7 +86,7 @@ const entry = (o = {}) => ({
 // ---- cross-unit query: the thing files could not do ------------------------
 {
   const dir = tmp('query');
-  const s = new PayloadStore({ dir });
+  const s = new PayloadStore({ query: _cfg.store, dir });
   const now = Date.now();
   s.saveQueue('!aa', [
     entry({ id: 'a1', state: 'done', createdAt: now - 3000 }),
@@ -106,7 +108,7 @@ const entry = (o = {}) => ({
 // ---- retention: caps terminal rows, NEVER touches a live one --------------
 {
   const dir = tmp('prune');
-  const s = new PayloadStore({ dir });
+  const s = new PayloadStore({ query: _cfg.store, dir });
   const now = Date.now();
   const rows = [];
   for (let i = 0; i < 10; i++) rows.push(entry({ id: `d${i}`, state: 'done', createdAt: now - (100 - i) * 1000 }));
@@ -140,7 +142,7 @@ const entry = (o = {}) => ({
       receipt: { type: 'pong' }, lastError: null },
   ]));
 
-  const s = new PayloadStore({ dir });
+  const s = new PayloadStore({ query: _cfg.store, dir });
   const got = s.loadQueue(unit);
   ok(got.length === 2, 'legacy queue.json imported — a queued instruction is not lost');
   const byId = Object.fromEntries(got.map((g) => [g.id, g]));
@@ -151,7 +153,7 @@ const entry = (o = {}) => ({
   ok(fs.existsSync(path.join(dir, unit, 'queue.json')), 'the legacy file is LEFT IN PLACE (a bad import must be recoverable)');
 
   // Import runs ONCE — a second open must not duplicate rows.
-  const s2 = new PayloadStore({ dir });
+  const s2 = new PayloadStore({ query: _cfg.store, dir });
   ok(s2.loadQueue(unit).length === 2, 'import is idempotent across restarts');
   fs.rmSync(dir, { recursive: true, force: true });
 }

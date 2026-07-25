@@ -24,7 +24,8 @@ class Gateway {
     this.port = gw.port;
     this.sendPort = gw.sendPort != null ? gw.sendPort : gw.port;
     this.eventsPath = gw.eventsPath || '/events';
-    this.reconnectMs = gw.reconnectMs != null ? gw.reconnectMs : 5000;
+    this.reconnectMs = (cfg.timing && cfg.timing.reconnectMs) != null
+      ? cfg.timing.reconnectMs : gw.reconnectMs;   // timing.reconnectMs, shared with the recorder
     this.ws = null;
     this.stopped = false;
     this.handlers = new Set();

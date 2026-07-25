@@ -7,7 +7,8 @@
 // which is worse than being consistently slightly wrong. Their implementation was given
 // verbatim on xsession (src/utils.js:24) and is reproduced in the expectations below.
 const assert = require('assert');
-const { Align, signalQuality, qualityBand, clampN, clampWindow } = require('../lib/align');
+const { Align, signalQuality, qualityBand } = require('../lib/align');
+const ACFG = require('../lib/settings').load({ config: {} }).align;
 
 let pass = 0;
 const ok = (c, m) => { assert(c, m); pass++; };
@@ -46,14 +47,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- clamps ----------------------------------------------------------------
 {
-  ok(clampN(0) === 4 && clampN(9) === 5 && clampN(3) === 3, 'n clamps to 1..5, default 4');
-  ok(clampWindow(1) === 5 && clampWindow(999) === 120 && clampWindow(45) === 45, 'reply window clamps 5..120');
+  // Clamps are INSTANCE methods now — the bounds are config (align.*), not constants, so
+  // they cannot be tested as free functions any more.
+  const a = new Align({ cfg: ACFG });
+  ok(a._clampN(0) === 4 && a._clampN(9) === 5 && a._clampN(3) === 3, 'n clamps to 1..5, default 4');
+  ok(a._clampWindow(1) === 5 && a._clampWindow(999) === 120 && a._clampWindow(45) === 45, 'reply window clamps 5..120');
+  // And they must FOLLOW config rather than the defaults.
+  const b = new Align({ cfg: { ...ACFG, burstMax: 3, replyWindowMaxSec: 60 } });
+  ok(b._clampN(9) === 3, 'burst max comes from config');
+  ok(b._clampWindow(999) === 60, 'reply window max comes from config');
 }
 
 // ---- the view-model --------------------------------------------------------
 function mkAlign(sent) {
   const cache = new Map();
   return new Align({
+    cfg: ACFG,
     send: async (text, opts) => { const id = 100 + sent.length; sent.push({ text, opts, id }); return { id }; },
     radios: { omni: '!2687afb1', yagi: '!fa39f7b4' },
     addrOf: (addr) => ({ 'E9:B0:3F:17:27:91': '!2687afb1', 'F4:12:FA:39:F7:B6': '!fa39f7b4' }[addr] || null),
@@ -94,6 +103,9 @@ function mkAlign(sent) {
     const v = a.view();
     ok(v.readings.length >= 1 || v.burst, 'a landed pong produces progress or a reading');
     await p;
+    // Clear the session: an unresolved burst leaves a ~31 s deadline timer pending, which
+    // holds the event loop open and makes the whole suite look like it hangs.
+    a.stop();
   }
 
   // Averaging + trend + best across two readings.

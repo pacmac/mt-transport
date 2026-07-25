@@ -8,6 +8,8 @@ const path = require('path');
 const { Mesh } = require('..');
 const { Model } = require('../lib/model');
 const { PayloadStore } = require('../lib/store');
+const _cfg = require('../lib/settings').load({ config: {} });
+
 
 let pass = 0;
 const ok = (c, m) => { assert(c, m); pass++; };
@@ -43,7 +45,7 @@ function mkMesh({ devices = {}, learned = [], dir = tmp('x') } = {}) {
   const m = new Mesh();
   m.cfg = { devices, units: {}, mode: { silentMs: 150000 } };
   m.model = new Model();
-  m.images = { store: new PayloadStore({ dir }) };
+  m.images = { store: new PayloadStore({ query: _cfg.store, dir }) };
   m._ours = new Set([...Object.keys(devices), ...m.images.store.loadDevices()]);
   for (const id of learned) m._markOurs(id);
   m.gw = { nodes: async () => ROSTER };

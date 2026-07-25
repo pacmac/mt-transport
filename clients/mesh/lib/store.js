@@ -29,8 +29,11 @@ const safeParse = (s) => { try { return JSON.parse(s); } catch { return null; } 
 const EXT = { 1: 'json', 2: 'jpg', 3: 'log', 4: 'json' }; // SCHEMA/IMAGE/LOG/JSON
 
 class PayloadStore {
-  constructor({ dir = './payloads' } = {}) {
+  constructor({ dir = './payloads', query = {} } = {}) {
     this.dir = dir;
+    // Declared (store.queryDefaultLimit / queryMaxLimit), not magic numbers inline.
+    this.defaultLimit = query.defaultLimit;
+    this.maxLimit = query.maxLimit;
     // ONE database for everything that must survive a restart: the request ledger and the
     // cache. Image bytes and transfer parts stay as files — they are bulk payload, and a
     // database is the wrong home for them.
@@ -237,6 +240,14 @@ class PayloadStore {
     return this.db.prepare('SELECT DISTINCT unit FROM requests').all().map((r) => r.unit);
   }
 
+  // Declared paging caps (store.queryDefaultLimit / queryMaxLimit) — checked on use so a
+  // missing value is an error, never a silent NaN.
+  _q(k) {
+    const v = this[k];
+    if (!Number.isFinite(v)) throw new Error(`store: store.${k} is required — declare it in settings.js`);
+    return v;
+  }
+
   // Cross-unit query — the thing files could not do. Everything sent, newest first.
   listRequests({ unit, state, kind, limit = 200, offset = 0 } = {}) {
     const where = [], args = [];
@@ -245,7 +256,8 @@ class PayloadStore {
     if (kind) { where.push('kind = ?'); args.push(String(kind)); }
     const sql = `SELECT * FROM requests ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`
       + ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    return this.db.prepare(sql).all(...args, Math.min(Number(limit) || 200, 1000), Number(offset) || 0)
+    return this.db.prepare(sql).all(...args,
+      Math.min(Number(limit) || this._q('defaultLimit'), this._q('maxLimit')), Number(offset) || 0)
       .map(rowToEntry);
   }
 

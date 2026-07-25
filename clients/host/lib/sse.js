@@ -16,7 +16,10 @@
 // "there was nothing to miss".
 'use strict';
 
-const KEEPALIVE_MS = 25000;   // comment frame; keeps idle proxies from closing us
+// timing.keepaliveMs (host config). Declared, not baked in.
+// Declared in host config as timing.keepaliveMs; this is the last-resort value used only
+// when the host is constructed without config at all (a bare SseHub in a test).
+const DEFAULT_KEEPALIVE_MS = 25000;   // comment frame; keeps idle proxies from closing us
 const SLOW_BYTES   = 1 << 20; // 1 MB queued to one client = it is not keeping up
 
 class SseHub {
@@ -24,7 +27,7 @@ class SseHub {
   constructor(opts = {}) {
     this.bufferSize = opts.bufferSize != null ? opts.bufferSize : 500;
     this.log = opts.log || { info() {}, warn() {}, debug() {} };
-    this.keepaliveMs = opts.keepaliveMs != null ? opts.keepaliveMs : KEEPALIVE_MS;
+    this.keepaliveMs = opts.keepaliveMs != null ? opts.keepaliveMs : DEFAULT_KEEPALIVE_MS;
     this._buf = [];        // ring of { id, event, json }
     this._nextId = 1;      // monotonic, never reused within a process lifetime
     this._clients = new Set();

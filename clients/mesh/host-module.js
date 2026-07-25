@@ -210,9 +210,32 @@ module.exports = {
         // (lib/config.js `map.writeVerb`). The uniform {type:set} port-260 channel
         // is unreachable over the text-only gateway, so consumers must never try to
         // build that payload themselves — this route is the supported path.
-        ['GET', '/schema/:target', async ({ params, query }) => {
-          try { return await mesh.getSchema(params.target, { refresh: query.get('refresh') === '1' }); }
-          catch (e) { return deviceUnreachable(e, params.target); }
+        // The config schema is a FILE, generated at firmware build time from CONFIG_FIELDS
+        // and NEVER pulled over the radio. It used to be 7 request/response round trips at
+        // 30-90 s each for ~1.2 kB of data that cannot change between builds — and it never
+        // once completed. Now it answers INSTANTLY, and works for a SLEEPING unit, which
+        // was impossible before.
+        ['GET', '/schema/:target', async ({ params }) => {
+          try {
+            const schema = await mesh.getSchema(params.target);
+            // Version honesty: the file states which firmware build it describes. If the
+            // unit reports a DIFFERENT build, say so rather than silently rendering a form
+            // for the wrong firmware. A unit we have never heard from has no known version
+            // — that is `stale: null` (unknown), not a claim in either direction.
+            let unitFw = null;
+            try {
+              const info = await mesh.unitInfo(params.target);
+              const devices = await mesh.devices();
+              const d = devices.find((x) => x.id === info.id);
+              unitFw = (d && d.fw) || null;
+            } catch { /* roster unavailable — leave unknown */ }
+            const stale = (unitFw && schema.fw) ? (unitFw !== schema.fw) : null;
+            return { ...schema, unitFw, stale };
+          } catch (e) {
+            return reply(e && e.code === 'ESCHEMAFILE' ? 503 : 500, {
+              error: (e && e.message) || String(e), code: e && e.code, target: params.target,
+            });
+          }
         }],
         ['GET', '/config/:target', async ({ params }) => {
           try { return await mesh.getConfig(params.target); }

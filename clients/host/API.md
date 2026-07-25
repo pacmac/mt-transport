@@ -165,7 +165,7 @@ mechanics — no ports, frames, channels or queues cross this boundary.
 | `POST /v1/mesh/mode` | `{unit, mode: dev\|live\|auto}` |
 | `GET /v1/mesh/images/:target` | list images held on a unit — **needs a live round-trip** |
 | `GET /v1/mesh/images/:target/:pid` | image bytes (`image/jpeg`) — **needs a live round-trip** |
-| `GET /v1/mesh/schema/:target` | **the device's self-describing field table** — served from cache, see below |
+| `GET /v1/mesh/schema/:target` | **the config field table** — a generated FILE, instant, no radio, see below |
 | `GET /v1/mesh/config/:target` | current config values — **needs a live round-trip** |
 | `POST /v1/mesh/config/:target` | `{field: value, …}` — schema-validated write |
 
@@ -311,39 +311,50 @@ invented for a silent burst.
 `channel` and `tx` are **reported** so the UI can display them; neither is accepted as
 input. Channel selection, addressing and reply correlation stay on our side.
 
-### Config schema — build your form from the DEVICE, not a hardcoded list
+### Config schema — a FILE, served instantly, never radio traffic
 
-`GET /v1/mesh/schema/:target` returns the device's own description of every settable
-field, so a config UI is generated rather than maintained:
-
-```json
-{ "ver": 3, "fetchedAt": 1784969000000, "fields": [
-  { "id": "alm.ovr", "ty": "n", "label": "Over-temp", "def": 30,
-    "writable": true, "min": 0, "max": 100, "bounded": true }
-]}
+```
+GET /v1/mesh/schema/:target
 ```
 
-`ty` is `n` numeric · `b` boolean · `t` text. `bounded` says whether `min`/`max` apply.
-A field added in firmware appears in your UI with **no dashboard change** — that is the
-point of exposing it.
+Answers in **milliseconds**, works for a **sleeping** unit, and costs **no airtime**.
 
-**It is served from a PERSISTENT cache, and that is not an optimisation.** The schema is
-pulled off the device by `sch` page requests, which only work while the unit is **awake**
-— a 15-minute sleeper is unreachable ~99% of the time. So the schema is persisted on
-disk and survives our restarts: without that, a dashboard could not render a config form
-until the unit happened to wake. Resolution order is hot cache → disk → device.
+```json
+{ "ver": 2, "fw": "2-260725-23", "source": "file",
+  "unitFw": "2-260725-21", "stale": true,
+  "fields": [
+    { "id": "beat", "ty": "n", "label": "Heartbeat", "def": 60,
+      "writable": true, "bounded": true, "min": 30, "max": 86400 },
+    { "id": "slp",  "ty": "b", "label": "Sleep", "def": 0,
+      "writable": true, "bounded": false },
+    { "id": "name", "ty": "t", "label": "Short name", "def": "",
+      "writable": true, "bounded": true, "min": 1, "max": 4 } ] }
+```
 
-- The schema only changes when **firmware** changes, so a cached copy stays valid.
-- After a flash, force a re-pull with `?refresh=1`.
-- If the device is unreachable and we hold no copy for it, you may get another unit's
-  cached schema flagged **`"stale": true`** — the schema is firmware-global, so a
-  sibling's copy describes it. A flagged form beats a blank page; check the flag.
-- Only if nothing is cached anywhere do you get `504`.
+`ty`: `n` numeric · `b` boolean · `t` text. **For `t`, `min`/`max` are LENGTH bounds**, not
+value bounds — same columns, different meaning by type.
 
-**Writes:** `POST /v1/mesh/config/:target` with a `{field: value}` patch. We validate
-against the schema and map each field to its own device verb. **Do not build port-260
-`{"type":"set"}` payloads** — that channel is unreachable over the text gateway. This
-route is the supported path.
+**Check `stale`.** The schema is generated at firmware build time, so it describes exactly
+one build:
+
+| `stale` | meaning |
+|---|---|
+| `false` | the unit runs the build this schema describes |
+| `true` | the unit runs a **different** build (`unitFw` vs `fw`) — say so in the UI |
+| `null` | the unit's firmware is **unknown** (never heard from) — not a claim either way |
+
+**This replaced an over-air pull, and the change is worth knowing about**: the schema used
+to be fetched as **7 request/response round trips** at 30–90 s each, for ~1.2 kB of data
+that cannot change between firmware builds. It never once completed. It is now generated
+from the firmware's own `CONFIG_FIELDS` table at build time, so it cannot drift from what
+the device validates against.
+
+There is **no `?refresh=1`** any more, and **no 504** — there is nothing to wait for. A
+`503` means the generated file is missing (the firmware has not been built); that is a
+build problem, not a radio problem.
+
+`GET /v1/mesh/config/:target` (live VALUES) is unchanged and **does** need the radio, so it
+still returns `504` for a sleeping unit.
 
 Events: `mesh.node`, `mesh.reply`, `mesh.text`, `mesh.detection`, `mesh.alert`,
 `mesh.image-available`, `mesh.image`, `mesh.error`, plus the request lifecycle:

@@ -30,7 +30,7 @@ const PORT_CHUNK = 261; // binary: chunk/push frames
 
 // Verbs that answer by ANOTHER route (a 260/binary frame), never a text reply — resolve
 // on send instead of waiting, else they always ETIMEOUT. Keyed by verb OR "verb subverb".
-const NO_REPLY = new Set(['debug', 'sch', 'cam grab', 'chunk pull', 'push pull']);
+const NO_REPLY = new Set(['debug', 'cam grab', 'chunk pull', 'push pull']);
 
 // Non-idempotent verbs: repeating them causes real side effects (double reboot, extra
 // watchdog reset), so the `cmd` passthrough must NOT auto-retry these. Everything else is
@@ -87,6 +87,7 @@ class Mesh extends EventEmitter {
     // keeps chunk transfer out of it.
     Object.assign(this.align, {
       send: (text, opts) => this.gw.sendText(this.gwId, text, opts),
+      cfg: this.cfg.align,
       radios: (this.cfg.align && this.cfg.align.radios) || {},
       channel: this.channel,
       cache: this.images && this.images.store && this.images.store.cache,
@@ -98,7 +99,8 @@ class Mesh extends EventEmitter {
       command: (node, verb, args) => this.command(node, verb, args, this._idem()),   // config/chunk cfg/name are idempotent
       send: (node, text) => this._sendRaw(node, text),      // `sch` pages: fire-and-forget over the DM path
       log: require('./lib/log').log.child('config'),
-      schemaTimeoutMs: this.cfg.timing && this.cfg.timing.chunkAnswerMs,
+      // The schema is a FILE (generated at firmware build time), never a radio pull.
+      schemaFile: this.cfg.schema && this.cfg.schema.file,
       // Persist the schema: pulling it needs the unit awake, and a sleeper is
       // unreachable ~99% of the time, so an in-memory cache would be empty after
       // every service restart. See Config.schema().
@@ -181,7 +183,6 @@ class Mesh extends EventEmitter {
     if (ev.kind === 'app' && ev.portnum === PORT_ALARM) {
       this._markOurs(ev.from);
       const obj = protocol.parse260(ev.payload);
-      if (obj && obj.t === 'sch') { this.config.onSchemaFrame(ev.from, obj); return; } // schema page, not model state
       this.model.apply({ from: ev.from, obj });
       this.emit('node', this.model.node(ev.from));
       return;
@@ -357,7 +358,7 @@ class Mesh extends EventEmitter {
     if (u.mode === 'dev' || u.mode === 'live') return u.mode;   // operator override
     const n = this.model.node(id);
     if (n && n.slp === 1) return 'live';                        // device reports sleep on
-    const silentMs = (this.cfg.mode && this.cfg.mode.silentMs) || 150000;
+    const silentMs = this.cfg.mode.silentMs;
     if (n && n.lastHeardMs && Date.now() - n.lastHeardMs > silentMs) return 'live'; // silent = asleep
     return 'dev';
   }
@@ -397,7 +398,7 @@ class Mesh extends EventEmitter {
   _awaitSettled(id, waitMs) {
     const TERMINAL = new Set(['done', 'sent', 'failed', 'expired', 'cancelled']);
     const limit = waitMs != null ? waitMs
-      : ((this.cfg.timing && this.cfg.timing.replyTimeoutMs) || 20000) + 2000;
+      : this.cfg.timing.replyTimeoutMs + this.cfg.timing.sendSpacingMs;
     const now = this.butler.get(id);
     if (now && TERMINAL.has(now.state)) return Promise.resolve(now);
     // No event surface to wait on (a bare/stubbed butler): report what we can see rather
