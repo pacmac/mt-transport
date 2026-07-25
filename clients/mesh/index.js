@@ -88,13 +88,19 @@ class Mesh extends EventEmitter {
     // Command butler: per-unit queue, delivered into the wake window ('heard'). deliver = the
     // idempotent PKC-DM command path (one attempt per window; the butler owns cross-window retry).
     this.butler = new Butler({
-      deliver: (unit, verb, args) => this.command(unit, verb, args, this._idem()),
+      // One deliver for both kinds; the entry says which. A text has no verb and no
+      // reply to wait for, so it cannot go down the command path.
+      deliver: (unit, verb, args, entry) => (entry && entry.kind === 'text'
+        ? this._deliverText(entry)
+        : this.command(unit, verb, args, this._idem())),
       store: this.images.store,
       log: require('./lib/log').log.child('butler'),
       cfg: this.cfg,
     });
-    for (const ev of ['queued', 'acked', 'failed', 'expired', 'cancelled']) {
-      this.butler.on(ev, (e) => this.emit('command-' + ev, e));
+    // Request lifecycle. Re-emitted as `request-*` and mapped onto the SSE wire in
+    // host-module.js, so a consumer can follow a request without polling.
+    for (const ev of ['queued', 'trying', 'done', 'sent', 'failed', 'expired', 'cancelled']) {
+      this.butler.on(ev, (e) => this.emit('request-' + ev, e));
     }
     this.on('heard', (e) => { this.butler.onHeard(e.from).catch((err) => log.debug('butler onHeard: %s', err && err.message)); });
 
@@ -334,9 +340,45 @@ class Mesh extends EventEmitter {
       return { queued: true, mode, id: entry.id, unit: id, verb, args: entry.args,
                note: 'delivers on the unit\'s next wake window', lastHeardMs: n && n.lastHeardMs || null };
     }
-    const reliab = this._cmdReliab(verb);
-    if (opts.noReply != null) reliab.noReply = opts.noReply;
-    return this.command(unit, verb, args, reliab);
+    // DEV (awake) unit: still goes through the ledger, so every command you send is
+    // recorded and trackable by id — previously this path was direct and INVISIBLE.
+    // The caller keeps its synchronous reply: the butler's immediate attempt does the
+    // work, and we simply wait for that entry to settle instead of bypassing it.
+    const entry = await this.queueCommand(unit, verb, args, opts);
+    const settled = await this._awaitSettled(entry.id, opts.waitMs);
+    if (settled && settled.state === 'done') return settled.result;
+    if (settled && settled.error) throw new MeshError(settled.error.message, settled.error.code);
+    // Still in flight when the caller's patience ran out: hand back the id rather than
+    // pretending it failed. The ledger keeps working on it.
+    return { queued: true, mode, id: entry.id, unit: id, verb, args: entry.args,
+             state: settled ? settled.state : 'queued',
+             note: 'still in progress — follow it by id' };
+  }
+
+  // Wait for one ledger entry to reach a terminal state. Used by the dev path so a
+  // caller keeps a synchronous reply without the command skipping the ledger.
+  _awaitSettled(id, waitMs) {
+    const TERMINAL = new Set(['done', 'sent', 'failed', 'expired', 'cancelled']);
+    const limit = waitMs != null ? waitMs
+      : ((this.cfg.timing && this.cfg.timing.replyTimeoutMs) || 20000) + 2000;
+    const now = this.butler.get(id);
+    if (now && TERMINAL.has(now.state)) return Promise.resolve(now);
+    // No event surface to wait on (a bare/stubbed butler): report what we can see rather
+    // than hanging on a listener that will never fire.
+    if (typeof this.butler.on !== 'function') return Promise.resolve(now);
+    return new Promise((resolve) => {
+      const done = (e) => {
+        if (!e || e.id !== id) return;
+        clearTimeout(timer);
+        for (const ev of ['done', 'sent', 'failed', 'expired', 'cancelled']) this.butler.removeListener(ev, done);
+        resolve(e);
+      };
+      const timer = setTimeout(() => {
+        for (const ev of ['done', 'sent', 'failed', 'expired', 'cancelled']) this.butler.removeListener(ev, done);
+        resolve(this.butler.get(id));
+      }, limit);
+      for (const ev of ['done', 'sent', 'failed', 'expired', 'cancelled']) this.butler.on(ev, done);
+    });
   }
 
   // Mode + liveness for a unit (for the daemon's /nodes/:id and the `mode` verb).
@@ -369,13 +411,36 @@ class Mesh extends EventEmitter {
   //   channel defaults to the configured private channel, NOT 0.
   async sendText(text, { to, channel } = {}) {
     if (typeof text !== 'string' || !text.length) throw new MeshError('sendText: text required', 'EUSAGE');
-    const opts = { channel: channel != null ? channel : this.channel };
+    const ch = channel != null ? channel : this.channel;
+    let toNum = null;
     if (to != null && to !== '*') {
       const r = await this._resolve(to);
       if (r.num == null) throw new MeshError(`sendText: cannot resolve target ${to}`, 'ETARGET');
-      opts.to = r.num;
+      toNum = r.num;
     }
-    return this.gw.sendText(this.gwId, text, opts);
+    // Text goes through the LEDGER like everything else. It used to be fire-and-forget
+    // and invisible: you could send a message and have no record it existed. It can only
+    // ever reach `sent`, never `done` — a plain text message carries no receipt.
+    //
+    // Key by the RESOLVED node id, exactly as commands do. Keying by the caller's raw
+    // string ('336b') would file the same device under two different units and split its
+    // history in half.
+    let unitKey = '*';
+    if (to != null && to !== '*') {
+      unitKey = await this._unitKey(to).catch(() => String(to));
+    }
+    return this.butler.enqueue(unitKey, null, [], {
+      kind: 'text', body: text, toNum, channel: ch,
+    });
+  }
+
+  // Deliver a ledger entry of kind 'text'. Separate from command delivery because there
+  // is no verb, no reply to correlate and no receipt to wait for — handing the frame to
+  // the gateway is the whole operation.
+  async _deliverText(entry) {
+    const opts = { channel: entry.channel != null ? entry.channel : this.channel };
+    if (entry.toNum != null) opts.to = entry.toNum;
+    return this.gw.sendText(this.gwId, entry.body, opts);
   }
 
   async ping(node) { return this.command(node, 'ping', [], this._idem()); }
@@ -398,6 +463,13 @@ class Mesh extends EventEmitter {
     return this.butler.enqueue(await this._unitKey(target), verb, args, opts);
   }
   async queueList(target) { return this.butler.list(target ? await this._unitKey(target) : undefined); }
+
+  // The outbox, queried. Reads the LEDGER rather than the butler's in-memory mirror, so
+  // it sees settled history too — the butler only holds what it is still working on.
+  async requests({ unit, state, kind, limit, offset } = {}) {
+    const u = unit ? await this._unitKey(unit).catch(() => unit) : undefined;
+    return this.images.store.listRequests({ unit: u, state, kind, limit, offset });
+  }
   queueCancel(id) { return this.butler.cancel(id); }
 
   // ---- daemon (long-running: model + autonomous image listener + domain feed) ----

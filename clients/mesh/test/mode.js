@@ -48,16 +48,34 @@ function mkMesh({ units = {}, silentMs = 150000 } = {}) {
   // 4. default
   { const m = mkMesh(); ok(m.unitMode('!zz') === 'dev', 'no data -> default dev'); }
 
-  // 5. dispatch routing: dev -> command (direct); live -> queueCommand
+  // 5. dispatch routing. BOTH modes now go through the LEDGER — a dev command used to be
+  //    direct and invisible, which meant most of what you sent left no record. The dev
+  //    caller still gets its reply synchronously: the butler's immediate attempt does the
+  //    work and dispatch waits for that entry to settle. See specs/request-ledger-sqlite.md.
   {
     const m = mkMesh({ units: { '!dd': { mode: 'dev' }, '!ee': { mode: 'live' } } });
-    let cmd = null, q = null;
-    m.command = async (u, v, a) => { cmd = { u, v, a }; return { type: v, ok: true }; };
+    let q = null;
     m.queueCommand = async (u, v, a) => { q = { u, v, a }; return { id: 'q1', args: a }; };
+    // Stand in for the butler: dispatch waits on it for the entry to settle.
+    m.butler = { get: () => ({ id: 'q1', state: 'done', result: { type: 'status', ok: true } }) };
     const r1 = await m.dispatch('!dd', 'status', ['mem']);
-    ok(cmd && cmd.v === 'status' && r1.ok && !r1.queued, 'dispatch dev -> direct command, returns reply');
+    ok(q && q.v === 'status', 'dispatch dev -> ENTERS THE LEDGER (no longer bypasses it)');
+    ok(r1 && r1.ok && !r1.queued, 'dispatch dev -> still returns the reply synchronously');
+
+    q = null;
     const r2 = await m.dispatch('!ee', 'status', ['mem']);
-    ok(q && q.v === 'status' && r2.queued && r2.mode === 'live', 'dispatch live -> queueCommand, returns queued ack');
+    ok(q && q.v === 'status' && r2.queued && r2.mode === 'live', 'dispatch live -> queued ack, unchanged');
+  }
+
+  // 5b. A dev command whose entry never settles must hand back the id, not pretend it
+  //     failed — the ledger keeps working on it.
+  {
+    const m = mkMesh({ units: { '!dd': { mode: 'dev' } } });
+    m.queueCommand = async (u, v, a) => ({ id: 'q2', args: a });
+    m.butler = { get: () => ({ id: 'q2', state: 'queued' }) };
+    const r = await m.dispatch('!dd', 'status', [], { waitMs: 10 });
+    ok(r.queued === true && r.id === 'q2' && r.state === 'queued',
+       'dispatch dev: unsettled -> returns the id and its state, never a false failure');
   }
 
   // 6. danger guard in live

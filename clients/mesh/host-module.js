@@ -28,6 +28,17 @@ const WIRE_EVENTS = {
   alert:             'alert',
   'image-available': 'image-available',
   image:             'image',
+  // Request lifecycle. These were emitted internally and mapped NOWHERE, so a consumer
+  // following a command had to poll — while API.md claimed events were watchable. They
+  // are on the wire now. `request-sent` is terminal for a text (no receipt is possible);
+  // `request-done` means a result actually came back.
+  'request-queued':    'request-queued',
+  'request-trying':    'request-trying',
+  'request-done':      'request-done',
+  'request-sent':      'request-sent',
+  'request-failed':    'request-failed',
+  'request-expired':   'request-expired',
+  'request-cancelled': 'request-cancelled',
   // 'error' MUST be subscribed: an unhandled 'error' on an EventEmitter throws, and
   // in a shared host that would take down the recorder too.
   error:             'error',
@@ -92,8 +103,20 @@ module.exports = {
           if (!node) return reply(404, { error: 'unknown node', target: params.target });
           return { ...node, ...info };
         }],
-        ['GET', '/queue', async () => mesh.queueList()],
-        ['GET', '/queue/:target', async ({ params }) => mesh.queueList(params.target)],
+        // The outbox: EVERY command and text you sent, with its state and tries. Not just
+        // what could not be delivered immediately — a dev command and a text used to
+        // leave no record at all. Filterable and paged because it is now the full record.
+        ['GET', '/queue', async ({ query }) => mesh.requests({
+          unit: query.get('unit') || undefined,
+          state: query.get('state') || undefined,
+          kind: query.get('kind') || undefined,
+          limit: query.get('limit') || undefined,
+          offset: query.get('offset') || undefined,
+        })],
+        ['GET', '/queue/:target', async ({ params, query }) => mesh.requests({
+          unit: params.target, state: query.get('state') || undefined,
+          limit: query.get('limit') || undefined, offset: query.get('offset') || undefined,
+        })],
         ['GET', '/mode/:target', async ({ params }) => mesh.unitInfo(params.target)],
 
         // ---- commands (mutate a real radio unit) ----------------------------

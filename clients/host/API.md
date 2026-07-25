@@ -177,9 +177,55 @@ outside its ~8 s wake window. You get **`504`** with
 Check `GET /v1/mesh/mode/:target` → `awake` first, or queue a command instead.
 
 **Commands are asynchronous by nature.** A unit may be asleep; a queued command returns
-an **id** immediately and is delivered in the unit's next wake window. Poll
-`GET /v1/mesh/queue` or watch events for the receipt. Do not expect a synchronous
-device reply.
+an **id** immediately. Follow it by polling `GET /v1/mesh/queue`, or watch the
+`mesh.request-*` events on the SSE stream.
+
+### The outbox — every message you send, with its state
+
+`GET /v1/mesh/queue` is the **record of everything sent**, not just what could not be
+delivered at once. A command to an awake unit and a free-form text used to leave **no
+trace at all**; both are in here now, trackable by id.
+
+```
+GET /v1/mesh/queue?unit=336b&state=queued&kind=text&limit=50&offset=0
+```
+
+```json
+[{ "id": "ms0c1ei7.1", "unit": "!8cee336b", "kind": "command",
+   "verb": "ping", "args": [], "body": null,
+   "state": "done", "tries": 1, "maxTries": 5,
+   "createdAt": 1784981736367, "triedAt": 1784981736380, "settledAt": 17849817391,
+   "result": { "type": "pong", "rssi": -55, "snr": 7 }, "error": null }]
+```
+
+| state | what it means |
+|---|---|
+| `queued` | accepted, not tried yet — normally milliseconds |
+| `trying` | attempt in flight |
+| `done` | completed and **confirmed** — `result` holds what came back |
+| `sent` | dispatched, **no confirmation is possible for this kind** — terminal |
+| `failed` | gave up after `tries` |
+| `expired` | not delivered within its time limit |
+| `cancelled` | cancelled via `DELETE /v1/mesh/queue/:id` |
+
+**`sent` and `done` are not the same tick.** A command gets a device reply, so `done`
+means it genuinely arrived. A free-form text carries **no receipt of any kind** — the
+most that can ever be said is that the gateway accepted it, so a text ends at `sent`.
+Rendering both as "delivered" would show a message as confirmed when nothing confirms it.
+
+**`error` is `{code, message}`** — `no_reply`, `unreachable`, `refused`, `expired`,
+`error`. Branch on the code; the message is for people.
+
+**A queued command is attempted IMMEDIATELY, then falls back to the wake window.** So
+against an awake unit you normally get a result in seconds.
+
+**A healthy command to a SLEEPING unit will show `tries: 1` and
+`error.code: "no_reply"` within seconds, then return to `queued`.** That is the first
+attempt missing a deaf radio — **not a failure**, and it must not be rendered as one.
+Only `failed` and `expired` are real failures.
+
+Requests are retained per unit (most recent ~500 settled); anything not yet settled is
+never dropped.
 
 ### Devices vs nodes — build your device list dynamically, never from hardcoded ids
 
@@ -251,8 +297,14 @@ against the schema and map each field to its own device verb. **Do not build por
 `{"type":"set"}` payloads** — that channel is unreachable over the text gateway. This
 route is the supported path.
 
-Events: `mesh.node`, `mesh.reply`, `mesh.detection`, `mesh.alert`,
-`mesh.image-available`, `mesh.image`, `mesh.error`.
+Events: `mesh.node`, `mesh.reply`, `mesh.text`, `mesh.detection`, `mesh.alert`,
+`mesh.image-available`, `mesh.image`, `mesh.error`, plus the request lifecycle:
+`mesh.request-queued`, `mesh.request-trying`, `mesh.request-done`, `mesh.request-sent`,
+`mesh.request-failed`, `mesh.request-expired`, `mesh.request-cancelled`.
+
+Each request event carries the full ledger entry, so a UI can follow a command from
+submission to result without polling. Watch `request-done` (confirmed) and
+`request-sent` (dispatched, unconfirmable) as **different** outcomes — see §6.1.
 
 ### 6.2 `recorder` — **STABLE**
 

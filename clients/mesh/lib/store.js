@@ -8,16 +8,45 @@
 const fs = require('fs');
 const path = require('path');
 const { Cache } = require('./cache');
+const { openDb } = require('./db');
+
+// A ledger row -> the entry shape the butler and the API speak. Kept in one place so the
+// column names never leak past this file.
+function rowToEntry(r) {
+  return {
+    id: r.id, unit: r.unit, kind: r.kind,
+    verb: r.verb, args: r.args ? JSON.parse(r.args) : [], body: r.body,
+    toNum: r.to_num, channel: r.channel,
+    state: r.state, tries: r.tries, maxTries: r.max_tries,
+    createdAt: r.created_at, triedAt: r.tried_at, settledAt: r.settled_at,
+    ttlMs: r.ttl_ms,
+    result: r.result ? safeParse(r.result) : null,
+    error: r.error_code ? { code: r.error_code, message: r.error_msg || null } : null,
+  };
+}
+const safeParse = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
 const EXT = { 1: 'json', 2: 'jpg', 3: 'log', 4: 'json' }; // SCHEMA/IMAGE/LOG/JSON
 
 class PayloadStore {
   constructor({ dir = './payloads' } = {}) {
     this.dir = dir;
-    // Everything that must survive a restart but is not a payload file lives here.
-    // Kept OUT of the per-node payload dirs so a node dir stays what it says it is:
-    // images and transfer parts.
-    this.cache = new Cache(path.join(dir, 'cache'));
+    // ONE database for everything that must survive a restart: the request ledger and the
+    // cache. Image bytes and transfer parts stay as files — they are bulk payload, and a
+    // database is the wrong home for them.
+    this.db = openDb(path.join(dir, 'mesh.db'));
+    this.cache = new Cache(this.db);
+    this._saveQueueTx = this.db.transaction((unit, rows) => {
+      this.db.prepare('DELETE FROM requests WHERE unit = ?').run(String(unit));
+      const ins = this.db.prepare(
+        `INSERT INTO requests (id, unit, kind, verb, args, body, to_num, channel, state, tries, max_tries,
+                               created_at, tried_at, settled_at, ttl_ms, result, error_code, error_msg)
+         VALUES (@id, @unit, @kind, @verb, @args, @body, @to_num, @channel, @state, @tries, @max_tries,
+                 @created_at, @tried_at, @settled_at, @ttl_ms, @result, @error_code, @error_msg)`,
+      );
+      for (const r of rows) ins.run(r);
+    });
+    this._importLegacyQueues();
   }
 
   save(buf, { pid, ptype = 2, node = 'unknown', when = Date.now() } = {}) {
@@ -166,24 +195,101 @@ class PayloadStore {
   _queuePath(node) {
     return path.join(this.dir, String(node).replace(/[^\w!-]/g, '_'), 'queue.json');
   }
+
+  // ---- the request ledger ----------------------------------------------------
+  // Was one queue.json per unit, rewritten IN FULL on every state change. Now rows, so a
+  // state transition is an UPDATE of one row and the ledger can actually be queried.
+  // The butler still hands us whole arrays; that is its interface, not the storage's.
   saveQueue(node, entries) {
-    const p = this._queuePath(node);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(entries, null, 2));
-    return p;
+    const rows = (entries || []).map((e) => ({
+      id: e.id, unit: node, kind: e.kind || 'command',
+      verb: e.verb != null ? e.verb : null,
+      args: e.args ? JSON.stringify(e.args) : null,
+      body: e.body != null ? e.body : null,
+      to_num: e.toNum != null ? e.toNum : null,
+      channel: e.channel != null ? e.channel : null,
+      state: e.state || e.status,          // tolerate either name while callers migrate
+      tries: e.tries != null ? e.tries : (e.attempts || 0),
+      max_tries: e.maxTries != null ? e.maxTries : (e.maxAttempts != null ? e.maxAttempts : 5),
+      created_at: e.createdAt != null ? e.createdAt : (e.enqueuedAt || Date.now()),
+      tried_at: e.triedAt != null ? e.triedAt : (e.sentAt || null),
+      settled_at: e.settledAt != null ? e.settledAt : (e.ackedAt || null),
+      ttl_ms: e.ttlMs != null ? e.ttlMs : null,
+      result: e.result != null ? JSON.stringify(e.result) : (e.receipt != null ? JSON.stringify(e.receipt) : null),
+      // The butler carries a structured {code, message}; `lastError` is the file-era
+      // prose, kept only so a legacy import still records why something failed.
+      error_code: (e.error && e.error.code) || e.errorCode || (e.lastError ? 'error' : null),
+      error_msg: (e.error && e.error.message) || e.errorMsg || e.lastError || null,
+    }));
+    // One transaction: a half-written queue is an instruction half-remembered.
+    this._saveQueueTx(node, rows);
+    return rows.length;
   }
+
   loadQueue(node) {
-    try { return JSON.parse(fs.readFileSync(this._queuePath(node), 'utf8')); }
-    catch { return []; }
+    return this.db.prepare('SELECT * FROM requests WHERE unit = ? ORDER BY created_at ASC')
+      .all(String(node)).map(rowToEntry);
   }
-  // Units with a persisted queue — the butler loads these on startup. Dir names ARE the unit
-  // keys (node ids like !987ab80f survive the [\w!-] sanitiser unchanged).
+
+  // Units with anything in the ledger — the butler loads these on startup.
   listQueuedUnits() {
+    return this.db.prepare('SELECT DISTINCT unit FROM requests').all().map((r) => r.unit);
+  }
+
+  // Cross-unit query — the thing files could not do. Everything sent, newest first.
+  listRequests({ unit, state, kind, limit = 200, offset = 0 } = {}) {
+    const where = [], args = [];
+    if (unit) { where.push('unit = ?'); args.push(String(unit)); }
+    if (state) { where.push('state = ?'); args.push(String(state)); }
+    if (kind) { where.push('kind = ?'); args.push(String(kind)); }
+    const sql = `SELECT * FROM requests ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`
+      + ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    return this.db.prepare(sql).all(...args, Math.min(Number(limit) || 200, 1000), Number(offset) || 0)
+      .map(rowToEntry);
+  }
+
+  // Retention: cap terminal requests per unit. NEVER prunes anything still live — a
+  // queued command is an instruction someone gave and must not evaporate.
+  pruneRequests(keepPerUnit = 500) {
+    const terminal = ['done', 'sent', 'failed', 'expired', 'cancelled'];
+    const marks = terminal.map(() => '?').join(',');
+    let removed = 0;
+    for (const unit of this.listQueuedUnits()) {
+      const r = this.db.prepare(
+        `DELETE FROM requests WHERE unit = ? AND state IN (${marks}) AND id NOT IN (
+           SELECT id FROM requests WHERE unit = ? AND state IN (${marks})
+           ORDER BY created_at DESC LIMIT ?)`,
+      ).run(unit, ...terminal, unit, ...terminal, Math.max(0, Number(keepPerUnit) || 0));
+      removed += r.changes;
+    }
+    return removed;
+  }
+
+  // One-time import of the file-era queues. A command queued before the switch is still
+  // someone's instruction, so it must survive. Files are LEFT IN PLACE — deleting them
+  // is a separate, later decision, and keeping them means a bad import is recoverable.
+  _importLegacyQueues() {
+    if (this.cache.value('meta', 'queues_imported')) return 0;
+    let units = [];
     try {
-      return fs.readdirSync(this.dir, { withFileTypes: true })
+      units = fs.readdirSync(this.dir, { withFileTypes: true })
         .filter((d) => d.isDirectory() && fs.existsSync(path.join(this.dir, d.name, 'queue.json')))
         .map((d) => d.name);
-    } catch { return []; }
+    } catch { /* no store dir yet */ }
+    let n = 0;
+    for (const unit of units) {
+      let entries = [];
+      try { entries = JSON.parse(fs.readFileSync(path.join(this.dir, unit, 'queue.json'), 'utf8')); }
+      catch { continue; }
+      if (!Array.isArray(entries) || !entries.length) continue;
+      // Old status names -> new states. `sent` is REUSED with a different meaning, so it
+      // must be rewritten, never passed through.
+      const MAP = { pending: 'queued', sent: 'trying', acked: 'done', failed: 'failed', expired: 'expired', cancelled: 'cancelled' };
+      this.saveQueue(unit, entries.map((e) => ({ ...e, state: MAP[e.status] || 'queued' })));
+      n += entries.length;
+    }
+    this.cache.put('meta', 'queues_imported', { at: Date.now(), count: n });
+    return n;
   }
 
   // Retention is NOT implemented. Left explicit rather than silently absent.

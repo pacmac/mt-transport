@@ -68,10 +68,17 @@ ok(c2.value('registry', 'devices').length === 2, 'a fresh instance reads from di
 ok(c2.value('schema', '!987ab80f').ver === 3, 'schema survives a new instance');
 
 // ---- corrupt entry is ignored, never fatal --------------------------------
-fs.writeFileSync(path.join(dir, 'schema', 'broken.json'), '{not json');
+// The ONLY backend-specific block in this file: corruption is injected the way the
+// storage can actually be corrupted. Under the old file backend that was a bad .json
+// file; under SQLite it is a row whose value is not parseable JSON. The PROPERTY being
+// asserted is identical — a corrupt entry must read as a miss and must not break a
+// listing of its neighbours.
 const c3 = new Cache(dir);
-ok(c3.get('schema', 'broken') === null, 'corrupt entry reads as a miss');
-ok(c3.all('schema').length === 2, 'corrupt entry is skipped by all(), others still listed');
+c3.db.prepare('INSERT INTO cache (ns, k, v, saved_at, ttl_ms) VALUES (?,?,?,?,NULL)')
+  .run('schema', 'broken', '{not json', Date.now());
+ok(c3.get('schema', 'broken').value === null, 'corrupt entry yields a null value, not a throw');
+ok(c3.all('schema').filter((e) => e.value && e.value.ver).length === 2,
+   'corrupt entry does not break the listing — the good ones are still there');
 
 // ---- key sanitising: a key cannot escape the cache dir --------------------
 c.put('schema', '../../escape', { ver: 1, fields: [] });

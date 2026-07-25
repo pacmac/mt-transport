@@ -1,81 +1,67 @@
 // Generic persistent cache — one place for anything that must survive a restart.
 //
-// WHY THIS EXISTS: the units sleep. A 15-minute sleeper is unreachable ~99% of the
-// time, so anything we can only learn from a live device (its config schema, the fact
-// that it is ours at all) is GONE after a service restart unless we wrote it down.
-// That is a correctness requirement, not a speed trick — see specs/single-service-host.md
-// "Schema cache". This module generalises what lib/store.js was doing for schemas alone.
+// WHY THIS EXISTS: the units sleep. A 15-minute sleeper is unreachable ~99% of the time,
+// so anything we can only learn from a live device (its config schema, the fact that it
+// is ours at all) is GONE after a service restart unless we wrote it down. That is a
+// correctness requirement, not a speed trick.
 //
-// BACKEND-AGNOSTIC ON PURPOSE. The storage here is one JSON file per entry, but no
-// caller may depend on that: task `cache-sqlite-backend` swaps this for better-sqlite3
-// (already installed and verified on this box) without touching a single call site.
-// Keep the method signatures below stable — they are the contract, not the files.
+// BACKED BY SQLITE (was one JSON file per entry). The INTERFACE IS UNCHANGED and that is
+// deliberate: test/cache.js passes against both backends without edits, which is what
+// made this swap safe. No caller knows where the bytes live.
 'use strict';
-const fs = require('fs');
 const path = require('path');
+const { openDb } = require('./db');
 
-// A namespace/key becomes a path segment, so it must not be able to escape the cache
-// dir or collide. Anything outside the safe set becomes '_', and the original is kept
-// in the entry so a mangled key is still identifiable by a human reading the file.
-const safe = (s) => String(s).replace(/[^\w!.-]/g, '_').slice(0, 180) || '_';
+// A namespace/key is stored verbatim now (SQLite does not care about path characters),
+// but keys are still bounded: an unbounded key would be a way to bloat the row.
+const norm = (s) => String(s).slice(0, 512);
 
 class Cache {
-  // dir: the cache ROOT. Namespaces are subdirectories of it.
-  constructor(dir) {
-    this.dir = dir;
-    this._mem = new Map();          // ns/key -> entry, avoids a disk read per get
+  // Accepts either a directory (the DB is created inside it) or an open DB handle, so the
+  // store and the ledger can share ONE database rather than opening two.
+  constructor(dirOrDb) {
+    if (dirOrDb && typeof dirOrDb === 'object' && typeof dirOrDb.prepare === 'function') {
+      this.db = dirOrDb;
+      this._ownsDb = false;
+    } else {
+      this.dir = dirOrDb;
+      this.db = openDb(path.join(String(dirOrDb), 'mesh.db'));
+      this._ownsDb = true;
+    }
+    this._put = this.db.prepare(
+      `INSERT INTO cache (ns, k, v, saved_at, ttl_ms) VALUES (@ns, @k, @v, @saved_at, @ttl_ms)
+       ON CONFLICT(ns, k) DO UPDATE SET v = excluded.v, saved_at = excluded.saved_at, ttl_ms = excluded.ttl_ms`,
+    );
+    this._get = this.db.prepare('SELECT v, saved_at, ttl_ms FROM cache WHERE ns = ? AND k = ?');
+    this._all = this.db.prepare('SELECT k, v, saved_at, ttl_ms FROM cache WHERE ns = ? ORDER BY saved_at DESC');
+    this._del = this.db.prepare('DELETE FROM cache WHERE ns = ? AND k = ?');
+    this._clear = this.db.prepare('DELETE FROM cache WHERE ns = ?');
   }
 
-  _nsDir(ns) { return path.join(this.dir, safe(ns)); }
-  _file(ns, key) { return path.join(this._nsDir(ns), `${safe(key)}.json`); }
-  _memKey(ns, key) { return `${safe(ns)}/${safe(key)}`; }
-
   // Store a value. ttlMs is OPTIONAL and defaults to no expiry — see get() for what
-  // expiry does (and, more importantly, what it does NOT do).
+  // expiry does, and more importantly what it does NOT do.
   put(ns, key, value, opts = {}) {
-    const entry = {
-      ns: String(ns), key: String(key), value,
-      savedAt: Date.now(),
-      ttlMs: (opts.ttlMs != null && Number.isFinite(opts.ttlMs) && opts.ttlMs > 0) ? Math.round(opts.ttlMs) : null,
-    };
-    const file = this._file(ns, key);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    // Write-then-rename: a crash mid-write must not leave a half-written file that
-    // reads as corrupt. rename(2) is atomic within a filesystem.
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(entry));
-    fs.renameSync(tmp, file);
-    this._mem.set(this._memKey(ns, key), entry);
-    return entry;
+    const ttlMs = (opts.ttlMs != null && Number.isFinite(opts.ttlMs) && opts.ttlMs > 0)
+      ? Math.round(opts.ttlMs) : null;
+    const savedAt = Date.now();
+    this._put.run({ ns: norm(ns), k: norm(key), v: JSON.stringify(value === undefined ? null : value), saved_at: savedAt, ttl_ms: ttlMs });
+    return { ns: String(ns), key: String(key), value, savedAt, ttlMs };
   }
 
   // Read an entry back with its age. Returns null only when we genuinely hold nothing.
   //
   // EXPIRY NEVER DELETES. An entry past its ttl comes back with `stale: true` and the
   // caller decides what that is worth. This is deliberate and load-bearing: a stale
-  // schema still describes the device far better than a blank form does, and dropping
-  // our only copy while the unit sleeps would reintroduce the exact bug the persistent
-  // schema cache was written to fix. `stale` must be honest, so it goes on the wire.
+  // schema still describes the device far better than a blank form does, and dropping our
+  // only copy while the unit sleeps would reintroduce the exact bug the persistent schema
+  // cache was written to fix. `stale` must be honest, so it goes on the wire.
   get(ns, key) {
-    const mk = this._memKey(ns, key);
-    let entry = this._mem.get(mk);
-    if (!entry) {
-      try { entry = JSON.parse(fs.readFileSync(this._file(ns, key), 'utf8')); }
-      catch { return null; }          // absent or corrupt: "no cache", never throw
-      if (!entry || typeof entry !== 'object') return null;
-      this._mem.set(mk, entry);
-    }
-    const ageMs = Date.now() - (entry.savedAt || 0);
-    return {
-      value: entry.value,
-      savedAt: entry.savedAt || null,
-      ttlMs: entry.ttlMs != null ? entry.ttlMs : null,
-      ageMs,
-      stale: entry.ttlMs != null && ageMs > entry.ttlMs,
-    };
+    const row = this._get.get(norm(ns), norm(key));
+    if (!row) return null;
+    return this._row(row);
   }
 
-  // The value alone — fresh OR stale. For callers that have no use for the metadata.
+  // The value alone — fresh OR stale. For callers with no use for the metadata.
   value(ns, key) {
     const e = this.get(ns, key);
     return e ? e.value : null;
@@ -84,37 +70,25 @@ class Cache {
   // Every entry in a namespace, newest first. Used where any copy will do (the
   // firmware-global schema falling back to a sibling unit's).
   all(ns) {
-    let names = [];
-    try { names = fs.readdirSync(this._nsDir(ns)).filter((n) => n.endsWith('.json')); }
-    catch { return []; }
-    const out = [];
-    for (const n of names) {
-      try {
-        const entry = JSON.parse(fs.readFileSync(path.join(this._nsDir(ns), n), 'utf8'));
-        if (!entry || typeof entry !== 'object') continue;
-        const ageMs = Date.now() - (entry.savedAt || 0);
-        out.push({
-          key: entry.key != null ? entry.key : n.replace(/\.json$/, ''),
-          value: entry.value,
-          savedAt: entry.savedAt || null,
-          ttlMs: entry.ttlMs != null ? entry.ttlMs : null,
-          ageMs,
-          stale: entry.ttlMs != null && ageMs > entry.ttlMs,
-        });
-      } catch { /* skip a corrupt entry rather than failing the whole listing */ }
-    }
-    return out.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+    return this._all.all(norm(ns)).map((row) => ({ key: row.k, ...this._row(row) }));
   }
 
-  del(ns, key) {
-    this._mem.delete(this._memKey(ns, key));
-    try { fs.unlinkSync(this._file(ns, key)); return true; } catch { return false; }
-  }
+  del(ns, key) { return this._del.run(norm(ns), norm(key)).changes > 0; }
+  clear(ns) { this._clear.run(norm(ns)); return true; }
 
-  clear(ns) {
-    for (const k of [...this._mem.keys()]) if (k.startsWith(`${safe(ns)}/`)) this._mem.delete(k);
-    try { fs.rmSync(this._nsDir(ns), { recursive: true, force: true }); return true; }
-    catch { return false; }
+  _row(row) {
+    const ageMs = Date.now() - row.saved_at;
+    let value = null;
+    // A row we cannot parse is treated as absent rather than throwing — same defensive
+    // posture the file backend had for a corrupt file.
+    try { value = JSON.parse(row.v); } catch { return { value: null, savedAt: row.saved_at, ttlMs: row.ttl_ms, ageMs, stale: false }; }
+    return {
+      value,
+      savedAt: row.saved_at,
+      ttlMs: row.ttl_ms != null ? row.ttl_ms : null,
+      ageMs,
+      stale: row.ttl_ms != null && ageMs > row.ttl_ms,
+    };
   }
 }
 
