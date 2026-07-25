@@ -211,4 +211,4 @@ which is what keeps a stuck PIR (id:1086 BUG 10) from filling the ring with alar
   touching the in-flight head, doing all mutation inside `enqueueFrame` (already the single
   writer), and the offline test asserting depth/order invariants.
 - A bug here degrades *every* frame the device sends, so the offline test is not optional.
-- `library.json` 0.5.0 → 0.6.0 (additive API).
+- `library.json` 0.5.0 → 0.6.0 (additive API) — DONE.

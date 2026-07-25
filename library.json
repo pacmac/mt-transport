@@ -1,6 +1,6 @@
 {
   "name": "mt-transport",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Meshtastic as a transport, not an operating system. Send and receive Meshtastic-compatible encrypted LoRa packets from a bare RadioLib sketch — no NodeDB, no router, no power state machine, no opinion about when your CPU sleeps.",
   "keywords": ["meshtastic", "lora", "sx1262", "radiolib", "low-power", "nrf52"],
   "license": "GPL-3.0-or-later",
