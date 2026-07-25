@@ -55,15 +55,23 @@ function memStore() {
     ok(n === 2, 'retry: deliver called exactly maxAttempts times');
   }
 
-  // 4. TTL expiry — swept before firing, never delivered
+  // 4. TTL expiry — swept before firing, never delivered.
+  //    Seeded straight into the store (the restart path) rather than via enqueue(): enqueue
+  //    now fires an IMMEDIATE attempt, which for a short-ttl entry would legitimately deliver
+  //    at t=0 while still inside its TTL. That is correct behaviour, so to test the SWEEP in
+  //    isolation the entry has to already be stale before the butler ever sees it.
   {
     const store = memStore();
     let fired = false;
+    store.saveQueue('!dd', [{
+      id: 'stale.0', unit: '!dd', verb: 'ping', args: [],
+      status: 'pending', enqueuedAt: Date.now() - 60000, ttlMs: 5,
+      attempts: 0, maxAttempts: 5,
+      sentAt: null, ackedAt: null, receipt: null, lastError: null,
+    }]);
     const b = new Butler({ deliver: async () => { fired = true; return {}; }, store });
-    const e = b.enqueue('!dd', 'ping', [], { ttlMs: 5 });
-    await sleep(15);
     await b.onHeard('!dd');
-    ok(b.get(e.id).status === 'expired' && !fired, 'ttl: expired past ttlMs, not delivered');
+    ok(b.get('stale.0').status === 'expired' && !fired, 'ttl: expired past ttlMs, not delivered');
   }
 
   // 5. persistence across a reload (fresh butler, same store)
@@ -100,6 +108,73 @@ function memStore() {
     release(); await p1;
     await b.onHeard('!gg');        // next window → 'second'
     ok(order.length === 2 && order[1] === 'second', 'FIFO: next window delivers the next pending');
+  }
+
+  // ---- immediate attempt on enqueue (spec: butler-immediate-attempt) -------------------
+  // A queued command must not wait for the unit's next transmission before anything is
+  // tried. Previously delivery happened ONLY in onHeard(), so a command could sit for a
+  // whole heartbeat (up to 15 min) against a unit that was awake and would have answered.
+
+  // 9. enqueue alone delivers — no onHeard anywhere in this block
+  {
+    const store = memStore();
+    let called = null;
+    const b = new Butler({ deliver: async (u, v, a) => { called = { u, v, a }; return { type: v, ok: true }; }, store });
+    const e = b.enqueue('!ii', 'ping', []);
+    await sleep(10);
+    ok(called && called.v === 'ping', 'immediate: enqueue delivers without any onHeard');
+    ok(b.get(e.id).status === 'acked', 'immediate: entry acked from the immediate attempt');
+    ok(b.get(e.id).attempts === 1, 'immediate: the attempt COUNTS (the ledger stays truthful)');
+    ok(b.get(e.id).receipt && b.get(e.id).receipt.type === 'ping', 'immediate: reply stored as the receipt');
+  }
+
+  // 10. enqueue() RETURNS BEFORE the delivery settles. This is the load-bearing one:
+  //     deliver() waits ~20 s on a radio reply, so if enqueue awaited it, POST /queue
+  //     would block for 20 s against a sleeping unit and break the "returns an id
+  //     immediately" contract.
+  {
+    const store = memStore();
+    let settled = false;
+    const b = new Butler({ deliver: async () => { await sleep(50); settled = true; return {}; }, store });
+    const e = b.enqueue('!jj', 'status', []);
+    ok(settled === false, 'immediate: enqueue does not block on the radio');
+    ok(e.status === 'pending', 'immediate: caller gets a pending entry with its id at once');
+    await sleep(80);
+    ok(settled === true && b.get(e.id).status === 'acked', 'immediate: the attempt completes behind the caller');
+  }
+
+  // 11. A FAILED immediate attempt must fall back to the wake-window path — the butler's
+  //     whole reason for existing is the sleeping unit, so that path must stay intact.
+  {
+    const store = memStore();
+    let n = 0;
+    const b = new Butler({ deliver: async () => { n++; if (n === 1) throw new Error('timeout: reply not received'); return { ok: true }; }, store });
+    const e = b.enqueue('!kk', 'ping', []);
+    await sleep(10);
+    ok(b.get(e.id).status === 'pending', 'immediate: a failed immediate attempt returns to pending');
+    ok(b.get(e.id).attempts === 1, 'immediate: the failed attempt is recorded');
+    ok(b.get(e.id).lastError === 'timeout: reply not received', 'immediate: the error is recorded');
+    await b.onHeard('!kk');
+    ok(b.get(e.id).status === 'acked' && n === 2, 'immediate: still delivers on the next window');
+  }
+
+  // 12. A BURST must not fire N concurrent deliveries — the inflight guard still holds
+  //     one command per window, which the immediate attempt shares rather than bypasses.
+  {
+    const store = memStore();
+    let concurrent = 0, maxConcurrent = 0, done = 0;
+    const b = new Butler({
+      deliver: async () => {
+        concurrent++; maxConcurrent = Math.max(maxConcurrent, concurrent);
+        await sleep(20); concurrent--; done++; return { ok: true };
+      }, store });
+    b.enqueue('!ll', 'ping', []);
+    b.enqueue('!ll', 'status', []);
+    b.enqueue('!ll', 'agc', []);
+    await sleep(60);
+    ok(maxConcurrent === 1, 'immediate: a burst never overlaps deliveries to one unit');
+    ok(done === 1, 'immediate: one command per window — the rest wait, as before');
+    ok(b.list('!ll').filter((x) => x.status === 'pending').length === 2, 'immediate: the other two stay pending');
   }
 
   console.log(`butler OK: ${pass} assertions passed`);

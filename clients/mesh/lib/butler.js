@@ -48,6 +48,26 @@ class Butler extends EventEmitter {
     this._persist(unit);
     this.emit('queued', entry);
     this.log.info('butler: queued %s %s for %s (id %s)', verb, entry.args.join(' '), unit, entry.id);
+
+    // Try ONCE immediately, rather than waiting for the unit's next transmission. A unit
+    // that is awake (or never sleeps, which is the deployed unit's current state) would
+    // otherwise sit for a whole heartbeat — up to 15 min — before a command left the
+    // gateway, for no reason.
+    //
+    // Deliberately NOT gated on "do we think it is awake": that reads unitMode(), whose
+    // slp/awake values are the known-unreliable ones (task model-sleep-truth). Always
+    // trying needs no state, so it cannot be wrong. The cost of guessing wrong is one
+    // frame a sleeping unit does not hear.
+    //
+    // NOT AWAITED, and that matters: deliver() waits ~20 s on a radio reply, so awaiting
+    // here would make POST /v1/mesh/queue block for 20 s against a sleeping unit and
+    // break the documented contract that a queued command returns an id immediately.
+    // _deliverNext shares the inflight guard, so this cannot overlap a window delivery.
+    setImmediate(() => {
+      this._deliverNext(unit, 'immediate').catch((e) => {
+        this.log.debug('butler: immediate attempt for %s errored: %s', unit, e && e.message);
+      });
+    });
     return entry;
   }
 
@@ -74,7 +94,13 @@ class Butler extends EventEmitter {
 
   // The unit's window is open (it transmitted). Fire the oldest pending command; the reply is
   // the receipt. Never overlap deliveries to one unit (one command per ~10 s window).
-  async onHeard(unit) {
+  async onHeard(unit) { return this._deliverNext(unit, 'window'); }
+
+  // The single delivery path, shared by the window trigger above and the immediate attempt
+  // in enqueue(). ONE implementation on purpose: two would be two places to get the
+  // inflight locking wrong, and that lock is what keeps us to one command per window.
+  // `reason` only changes the log line.
+  async _deliverNext(unit, reason = 'window') {
     if (!unit || this.inflight.has(unit)) return;
     const now = Date.now();
     this._sweep(unit, now);
@@ -83,7 +109,8 @@ class Butler extends EventEmitter {
     this.inflight.add(unit);
     next.status = 'sent'; next.attempts++; next.sentAt = Date.now();
     this._persist(unit);
-    this.log.info('butler: window open for %s — delivering %s (attempt %d)', unit, next.verb, next.attempts);
+    this.log.info('butler: %s — delivering %s for %s (attempt %d)',
+      reason === 'immediate' ? 'immediate try' : 'window open', next.verb, unit, next.attempts);
     try {
       const reply = await this.deliver(unit, next.verb, next.args);
       next.status = 'acked'; next.ackedAt = Date.now(); next.receipt = reply; next.lastError = null;
