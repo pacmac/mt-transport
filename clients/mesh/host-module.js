@@ -162,9 +162,14 @@ module.exports = {
         // to nodes that are ours to talk to.
         ['POST', '/text', async ({ body }) => {
           if (!body || typeof body.text !== 'string' || !body.text.length)
-            return reply(400, { error: 'need {text, to?, channel?}' });
+            return reply(400, { error: 'need {text, to?, channel?, replyId?}' });
           try {
-            const r = await mesh.sendText(body.text, { to: body.to, channel: body.channel });
+            const r = await mesh.sendText(body.text, {
+              to: body.to, channel: body.channel,
+              // replyId threads this against a message you received (its packetId, which
+              // arrives on the `text` event) so it shows as a reply, not a standalone.
+              replyId: body.replyId,
+            });
             return { sent: true, to: body.to ?? null, channel: body.channel ?? null, result: r ?? null };
           } catch (e) { return reply(502, { error: (e && e.message) || String(e), code: e && e.code }); }
         }],

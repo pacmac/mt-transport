@@ -169,7 +169,13 @@ class Mesh extends EventEmitter {
       // which meant an operator texting the mesh was invisible to this service.
       // Surfaced as 'text' so a console/chat consumer can see it; deliberately NOT
       // fed to timing.onReply, since it correlates to no command.
-      else this.emit('text', { from: ev.from, text: ev.text, channel: ev.channel, replyId: ev.replyId });
+      else this.emit('text', {
+        from: ev.from, text: ev.text, channel: ev.channel,
+        // packetId is what a REPLY threads against (Meshtastic reply_id). It was captured
+        // in gw._normalize but never surfaced, so a consumer could read a message and had
+        // no way to answer it as a reply — it could only send a standalone text.
+        packetId: ev.packetId, replyId: ev.replyId,
+      });
       return;
     }
     if (ev.kind === 'app' && ev.portnum === PORT_ALARM) {
@@ -440,7 +446,7 @@ class Mesh extends EventEmitter {
   // rather than bolted onto the command path.
   //   to      target (num, '!id' or short form). Omit for a broadcast on the channel.
   //   channel defaults to the configured private channel, NOT 0.
-  async sendText(text, { to, channel } = {}) {
+  async sendText(text, { to, channel, replyId } = {}) {
     if (typeof text !== 'string' || !text.length) throw new MeshError('sendText: text required', 'EUSAGE');
     const ch = channel != null ? channel : this.channel;
     let toNum = null;
@@ -462,6 +468,9 @@ class Mesh extends EventEmitter {
     }
     return this.butler.enqueue(unitKey, null, [], {
       kind: 'text', body: text, toNum, channel: ch,
+      // Threads the reply against the message being answered, so it lands as a reply on
+      // the recipient's device rather than as an unrelated text.
+      replyId: replyId != null ? Number(replyId) : null,
     });
   }
 
@@ -471,6 +480,7 @@ class Mesh extends EventEmitter {
   async _deliverText(entry) {
     const opts = { channel: entry.channel != null ? entry.channel : this.channel };
     if (entry.toNum != null) opts.to = entry.toNum;
+    if (entry.replyId != null) opts.replyId = entry.replyId;
     return this.gw.sendText(this.gwId, entry.body, opts);
   }
 

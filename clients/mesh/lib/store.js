@@ -16,7 +16,7 @@ function rowToEntry(r) {
   return {
     id: r.id, unit: r.unit, kind: r.kind,
     verb: r.verb, args: r.args ? JSON.parse(r.args) : [], body: r.body,
-    toNum: r.to_num, channel: r.channel,
+    toNum: r.to_num, channel: r.channel, replyId: r.reply_id,
     state: r.state, tries: r.tries, maxTries: r.max_tries,
     createdAt: r.created_at, triedAt: r.tried_at, settledAt: r.settled_at,
     ttlMs: r.ttl_ms,
@@ -39,9 +39,9 @@ class PayloadStore {
     this._saveQueueTx = this.db.transaction((unit, rows) => {
       this.db.prepare('DELETE FROM requests WHERE unit = ?').run(String(unit));
       const ins = this.db.prepare(
-        `INSERT INTO requests (id, unit, kind, verb, args, body, to_num, channel, state, tries, max_tries,
+        `INSERT INTO requests (id, unit, kind, verb, args, body, to_num, channel, reply_id, state, tries, max_tries,
                                created_at, tried_at, settled_at, ttl_ms, result, error_code, error_msg)
-         VALUES (@id, @unit, @kind, @verb, @args, @body, @to_num, @channel, @state, @tries, @max_tries,
+         VALUES (@id, @unit, @kind, @verb, @args, @body, @to_num, @channel, @reply_id, @state, @tries, @max_tries,
                  @created_at, @tried_at, @settled_at, @ttl_ms, @result, @error_code, @error_msg)`,
       );
       for (const r of rows) ins.run(r);
@@ -208,6 +208,7 @@ class PayloadStore {
       body: e.body != null ? e.body : null,
       to_num: e.toNum != null ? e.toNum : null,
       channel: e.channel != null ? e.channel : null,
+      reply_id: e.replyId != null ? e.replyId : null,
       state: e.state || e.status,          // tolerate either name while callers migrate
       tries: e.tries != null ? e.tries : (e.attempts || 0),
       max_tries: e.maxTries != null ? e.maxTries : (e.maxAttempts != null ? e.maxAttempts : 5),

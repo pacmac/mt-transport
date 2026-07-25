@@ -61,6 +61,9 @@ const MIGRATIONS = [
       );
     `);
   },
+  // 2 — threading: a reply carries the packet id it answers, so a RETRY keeps its thread
+  //     instead of silently arriving as a standalone message.
+  (db) => { db.exec('ALTER TABLE requests ADD COLUMN reply_id INTEGER'); },
 ];
 
 // Open (creating if needed) and bring the schema up to date. Returns the better-sqlite3

@@ -276,5 +276,20 @@ function memStore() {
     ok(b.enqueue('!tt', 'ping', []).id, 'cap: a new command is still accepted despite long history');
   }
 
+  // 21. A text's delivery target must survive enqueue AND a reload. The DB columns and the
+  //     store mapping both existed, but the ENTRY never carried them — so every directed
+  //     message silently became a broadcast. Nothing asserted the middle of that chain.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => { await sleep(10000); return {}; }, store });
+    const e = b.enqueue('!da5af428', null, [], { kind: 'text', body: 'hi', toNum: 3663393832, channel: 2 });
+    ok(e.toNum === 3663393832, 'text: toNum is on the entry');
+    ok(e.channel === 2, 'text: channel is on the entry');
+    const reloaded = new Butler({ deliver: async () => ({}), store }).get(e.id);
+    ok(reloaded.toNum === 3663393832 && reloaded.channel === 2, 'text: addressing survives a reload');
+    const bare = b.enqueue('*', null, [], { kind: 'text', body: 'broadcast me' });
+    ok(bare.toNum === null && bare.channel === null, 'text: no target -> null, so the send path broadcasts');
+  }
+
   console.log(`butler OK: ${pass} assertions passed`);
 })().catch((e) => { console.error('butler FAILED:', (e && e.stack) || e); process.exit(1); });

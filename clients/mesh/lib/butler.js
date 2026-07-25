@@ -95,6 +95,13 @@ class Butler extends EventEmitter {
       id: genId(), unit, kind, verb: kind === 'text' ? null : verb,
       body: kind === 'text' ? String(opts.body != null ? opts.body : verb) : null,
       args: normArgs,
+      // Delivery target for a text, captured at submit time so a RETRY goes exactly where
+      // the original was aimed. These were previously dropped here — the DB columns and
+      // the store mapping both existed, but the entry never carried them, so every
+      // directed message silently went out as a broadcast.
+      toNum: opts.toNum != null ? opts.toNum : null,
+      channel: opts.channel != null ? opts.channel : null,
+      replyId: opts.replyId != null ? opts.replyId : null,
       state: 'queued', createdAt: Date.now(),
       ttlMs: opts.ttlMs != null ? opts.ttlMs : this.ttlMs,
       tries: 0, maxTries: opts.maxTries != null ? opts.maxTries : (opts.maxAttempts != null ? opts.maxAttempts : this.maxTries),
