@@ -6,7 +6,12 @@ status: IMPLEMENTED 2026-07-25. Policy extracted to a NEW dependency-free module
   state machine reads concurrently. Priority scale + ordering + evict-when-full PORTED from
   Meshtastic's MeshPacketQueue; replace-by-key is ours (they never hold a backlog across a sleep
   cycle). offline_txqueue: 68 checks PASS. Build clean (RAM +8 B). Flashed to bench 336b.
-  On-air burst test OUTSTANDING.
+  ON-AIR BURST TEST DONE 2026-07-25 and it FOUND A REAL DEFECT: broadcastConfig() was
+  classified as an un-keyed PRIO_RESPONSE, so 16 config-changing commands queued 16 CONFIG
+  frames and filled the ring to capacity. Fixed to PRIO_DEFAULT + RK_CONFIG (commit 41a8c02);
+  re-ran the identical burst: depth now stays at 1 (1x enq, 15x enqrep). Also learned:
+  serial-injected commands never reach the radio (tx=0), so the 2026-07-24 storm was the
+  CONFIG broadcasts, not the command replies.
 source_hash:
   ../../mylibs/mt-txqueue/src/MtTxQueue.h: c1e2d0402d8cdd0a3be980e7c784d22c34b44c0b9f94551dbd4e1f5011c9c6f1
   ../../mylibs/mt-txqueue/test/offline_txqueue.cpp: 8ae7964aeaa44ca97b880eb56e467235cfad38bdae29425c7c8b64eab3be4db5
