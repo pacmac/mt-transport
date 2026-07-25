@@ -214,6 +214,11 @@ bool MeshtasticTransport::buildAndQueue(uint32_t portnum, const uint8_t *payload
     memcpy(f, &h, sizeof(h));
     size_t frameLen = sizeof(h) + cipherLen;
 
+    // Read the one-shot class BEFORE enqueueFrame() consumes it — a reliable send
+    // needs it later to re-enqueue the retransmit as the same class.
+    const uint8_t queuedPrio = _nextClassSet ? _nextPrio : (uint8_t)mttx::PRIO_DEFAULT;
+    const uint8_t queuedRkey = _nextClassSet ? _nextRkey : (uint8_t)mttx::KEY_NONE;
+
     if (!enqueueFrame(f, frameLen))
         return false; // queue full — caller may retry
 
@@ -232,31 +237,50 @@ bool MeshtasticTransport::buildAndQueue(uint32_t portnum, const uint8_t *payload
         memcpy(_pendingFrame, f, frameLen);
         _pendingLen = frameLen;
         _pendingId = id;
+        // Remember the class so the retransmit re-enters the ring as what it IS.
+        // enqueueFrame() consumed the one-shot above, so capture it here.
+        _pendingPrio = queuedPrio;
+        _pendingRkey = queuedRkey;
         _pendingAttempts = 1;                // this transmission is attempt 1
         _pendingDeadline = millis() + _ackTimeoutMs;
     }
     return true;
 }
 
-// Copy a fully-built frame into the outbound ring. txAfter = now (step 4 will
-// derive a channel-utilisation spacing here). Returns false if the ring is full.
+// Copy a fully-built frame into the outbound ring, applying the queue policy set by
+// classifyNextTx() (default TXP_NORMAL/TXK_NONE = plain FIFO append, i.e. v1
+// behaviour). Returns false if the frame cannot be queued.
+//
+// Policy, in order: replace-in-place by key -> evict-for-HIGH when full -> priority
+// insert. The FRONT frame may be MID-TRANSMIT (TX_SCANNING/TX_SENDING), so it is
+// never replaced, evicted or displaced — overwriting bytes the radio is clocking out
+// would corrupt the frame on air.
 bool MeshtasticTransport::enqueueFrame(const uint8_t *frame, size_t len)
 {
-    if (len == 0 || len > FRAME_CAP || _txCount >= TXQ_N)
-        return false;
+    // Consume the one-shot class FIRST (see classifyNextTx) — before any early
+    // return — so a rejected enqueue can never leak its class onto the next,
+    // unrelated frame. Same discipline as _wantRespNext in send().
+    const uint8_t prio = _nextClassSet ? _nextPrio : (uint8_t)mttx::PRIO_DEFAULT;
+    const uint8_t rkey = _nextClassSet ? _nextRkey : (uint8_t)mttx::KEY_NONE;
+    _nextClassSet = false;
+
     // Scheduled (not blocking) send time: the one-shot override if the caller set
-    // one (replies use it for an SNR-weighted delay + a spaced resend), otherwise
-    // the utilisation-derived contention delay. Either way send() returns at once.
-    uint32_t after = _nextTxDelaySet ? _nextTxDelay : getTxDelayMsec();
+    // one (replies use it for a spaced resend), otherwise the utilisation-derived
+    // contention delay. Either way send() returns at once.
+    const uint32_t after = _nextTxDelaySet ? _nextTxDelay : getTxDelayMsec();
     _nextTxDelaySet = false;
-    uint8_t tail = (_txHead + _txCount) % TXQ_N;
-    memcpy(_txq[tail].frame, frame, len);
-    _txq[tail].len = (uint16_t)len;
-    _txq[tail].txAfter = millis() + after;
-    _txq[tail].attempts = 0;
-    _txCount++;
-    trace("enq", len, _txCount);
-    return true;
+
+    // The front frame is untouchable while the radio is clocking it out — the queue
+    // must never replace, displace or evict bytes already going to the antenna.
+    const bool headBusy = (_txState == TX_SCANNING || _txState == TX_SENDING);
+
+    TxQ::Outcome oc;
+    const bool ok = _txq.enqueue(frame, (uint16_t)len, millis() + after,
+                                 prio, rkey, headBusy, &oc);
+    if (ok)
+        trace(oc == TxQ::REPLACED ? "enqrep" : (oc == TxQ::EVICTED_TO_FIT ? "enqevict" : "enq"),
+              len, _txq.count());
+    return ok;
 }
 
 void MeshtasticTransport::armRx()
@@ -361,7 +385,7 @@ uint32_t MeshtasticTransport::getTxDelayMsec()
 // arrives later as a DIO1 interrupt.
 void MeshtasticTransport::startSending()
 {
-    TxItem &it = _txq[_txHead];
+    TxItem &it = *_txq.front();
     // A frame may have arrived while RX was armed between backoffs; transmitting
     // destroys it. service() now drains RX normally, so this is rare, but a frame
     // caught at this exact instant is still lost — COUNT it (step 5 adds the
@@ -377,7 +401,7 @@ void MeshtasticTransport::startSending()
         trace("txerr", (uint32_t)st, 0);
         _txFailStreak++;
         _txDropped++; // queued, never went out — otherwise invisible to the caller
-        _txCount--; _txHead = (_txHead + 1) % TXQ_N; // drop the unsendable frame
+        _txq.popFront();  // drop the unsendable frame
         _txState = TX_IDLE;
         armRx();
         return;
@@ -396,13 +420,13 @@ void MeshtasticTransport::startSending()
 void MeshtasticTransport::driveTx()
 {
     uint32_t now = millis();
-    if (_txState == TX_IDLE && _txCount > 0)
+    if (_txState == TX_IDLE && !_txq.empty())
         _txState = TX_WAITING;
 
     switch (_txState) {
     case TX_WAITING: {
-        if (_txCount == 0) { _txState = TX_IDLE; break; }
-        TxItem &it = _txq[_txHead];
+        if (_txq.empty()) { _txState = TX_IDLE; break; }
+        TxItem &it = *_txq.front();
         if ((int32_t)(now - it.txAfter) < 0)
             break; // scheduled for later — come back next pass
         if (it.attempts >= 8) {            // fail-open: 8 busy scans, send anyway
@@ -433,7 +457,7 @@ void MeshtasticTransport::driveTx()
             _radio->finishTransmit();
             _txFailStreak++;
             _txDropped++; // TX-done never arrived; the frame is abandoned here
-            _txCount--; _txHead = (_txHead + 1) % TXQ_N;
+            _txq.popFront();
             _txState = TX_IDLE;
             armRx();
         }
@@ -606,7 +630,7 @@ void MeshtasticTransport::service()
             _radio->finishTransmit();                     // clears IRQ, chip to standby
             trace("txdone", 0, 0);
             _txFailStreak = 0;
-            _txCount--; _txHead = (_txHead + 1) % TXQ_N;  // sent — drop it
+            _txq.popFront();  // sent — drop it
             _txState = TX_IDLE;
             armRx();
         } else if (_txState == TX_SCANNING &&
@@ -615,9 +639,9 @@ void MeshtasticTransport::service()
                 // Busy: a preamble is on air. LISTEN (don't sit deaf), back off,
                 // retry the same frame later. Live listen with zero blocking.
                 _csmaDeferrals++;
-                _txq[_txHead].attempts++;
-                trace("cadbusy", _txq[_txHead].attempts, 0);
-                _txq[_txHead].txAfter = millis() + getTxDelayMsec(); // re-roll the window
+                _txq.front()->attempts++;
+                trace("cadbusy", _txq.front()->attempts, 0);
+                _txq.front()->txAfter = millis() + getTxDelayMsec(); // re-roll the window
                 _txState = TX_WAITING;
                 armRx();
             } else {
@@ -652,6 +676,9 @@ void MeshtasticTransport::serviceAck()
     // Re-enqueue verbatim. If the TX ring is momentarily full, leave the deadline
     // in the past and try again next pass — do NOT burn an attempt on a frame that
     // never entered the queue.
+    // Resend as the class it was originally sent as; enqueueFrame() consumes the
+    // one-shot on every path, so a refused enqueue leaves nothing behind.
+    classifyNextTx(_pendingPrio, _pendingRkey);
     if (enqueueFrame(_pendingFrame, _pendingLen)) {
         _pendingAttempts++;
         _ackRetransmits++;

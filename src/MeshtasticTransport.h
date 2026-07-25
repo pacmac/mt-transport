@@ -17,6 +17,7 @@
 #include <RadioLib.h>
 
 #include "mt_wire.h"
+#include <MtTxQueue.h>   // priority + replace-by-key outbound queue policy
 
 namespace mt {
 
@@ -175,7 +176,7 @@ public:
 
     // True while a transmission is queued or in flight — the send path is async
     // now, so this actually means something (unlike the old blocking transmit()).
-    bool busy() const { return _txState != TX_IDLE || _txCount > 0; }
+    bool busy() const { return _txState != TX_IDLE || !_txq.empty(); }
 
     // Meshtastic contention model (RadioInterface::getTxDelayMsec). NOT a delay():
     // how many ms to SCHEDULE a transmit ahead — a random multiple of a slot time
@@ -192,6 +193,29 @@ public:
     // the key-request bootstrap (directed NodeInfo asking the peer to answer with
     // its User/public key). Mirrors the scheduleNextTxIn one-shot pattern.
     void wantResponseNext() { _wantRespNext = true; }
+
+    // ---- outbound queue policy (mt-txqueue) ------------------------------------
+    // The queue itself lives in mt-txqueue (MtTxQueue.h): Meshtastic's priority
+    // scale + ordering + evict-when-full, plus replace-by-key so a newer STATE frame
+    // supersedes a queued one instead of piling up behind a backlog. This transport
+    // only routes the caller's classification through to it — it attaches no meaning
+    // to the values, because it is a transport, not an operating system. The
+    // APPLICATION decides what is urgent and what is stale.
+    //
+    // One-shot: the NEXT enqueued frame carries this priority and replace-key, then
+    // the setting is consumed — it can never leak onto an unrelated later frame
+    // (same discipline as scheduleNextTxIn/wantResponseNext).
+    //   prio — mttx::PRIO_* (Meshtastic's meshtastic_MeshPacket_Priority values):
+    //          PRIO_BACKGROUND bulk, PRIO_DEFAULT periodic state, PRIO_RESPONSE
+    //          replies, PRIO_ALERT alarms. Higher goes first, and may evict a
+    //          lower-priority queued frame when the queue is full.
+    //   rkey — mttx::KEY_NONE for a unique EVENT (never superseded); non-zero means
+    //          "this reports state <rkey>", so a newer frame with the same key
+    //          REPLACES the queued one in place.
+    // Unclassified sends are PRIO_DEFAULT + KEY_NONE, i.e. the v1 FIFO behaviour, so
+    // existing callers and other consumers of this library are unaffected.
+    void classifyNextTx(uint8_t prio, uint8_t rkey = mttx::KEY_NONE)
+         { _nextPrio = prio; _nextRkey = rkey; _nextClassSet = true; }
 
     // TEST/DIAGNOSTIC hop override. When 1..7, send() forces EVERY frame's hop_limit
     // to this value regardless of the per-call argument; 0 = off (use the per-call
@@ -299,6 +323,9 @@ private:
     uint32_t _nextTxDelay = 0;        // one-shot scheduled-delay override…
     bool     _nextTxDelaySet = false; // …consumed by the next enqueueFrame()
     bool     _wantRespNext = false;   // one-shot Data.want_response (wantResponseNext)
+    uint8_t  _nextPrio = mttx::PRIO_DEFAULT; // one-shot queue class (classifyNextTx)…
+    uint8_t  _nextRkey = mttx::KEY_NONE;     // …
+    bool     _nextClassSet = false;          // …consumed by the next enqueueFrame()
     uint8_t  _hopOverride = 0;        // 0=off; 1..7 forces every frame's hop (test, RAM-only)
     uint8_t _frame[FRAME_CAP];    // introspection: the most recently built frame
     size_t  _frameLen = 0;
@@ -311,6 +338,10 @@ private:
     uint32_t _pendingId = 0;
     uint32_t _pendingDeadline = 0;    // millis() when the next retransmit is due
     uint8_t  _pendingAttempts = 0;    // transmissions so far (original = 1)
+    // The retransmit must carry the ORIGINAL frame's class, or an alarm resend would
+    // silently demote itself to TXP_NORMAL and queue behind bulk (see enqueueFrame).
+    uint8_t  _pendingPrio = mttx::PRIO_DEFAULT;
+    uint8_t  _pendingRkey = mttx::KEY_NONE;
     uint32_t _ackTimeoutMs = 4000;
     uint8_t  _ackMaxAttempts = 3;
     uint32_t _ackRetransmits = 0;     // cumulative
@@ -334,19 +365,16 @@ private:
 
     // Outbound queue + transmit state machine (async, non-blocking).
     enum TxState : uint8_t { TX_IDLE, TX_WAITING, TX_SCANNING, TX_SENDING };
-    struct TxItem {
-        uint8_t  frame[FRAME_CAP];
-        uint16_t len;
-        uint32_t txAfter;   // millis() gate — do not transmit before this
-        uint8_t  attempts;  // CSMA backoff count; >=8 fails open (transmit anyway)
-    };
     // Sized to hold a heartbeat bundle (6) PLUS an in-flight chunk pull batch
     // (node-dash pulls 4) PLUS a command reply, so a chunk transfer coinciding
     // with a heartbeat never overflows the queue and silently drops a frame.
     // (ChunkServer::onFrame enqueues the whole pulled batch in one call.)
+    // NOTE: depth is NOT the fix for congestion — a bigger ring only postpones the
+    // same failure. The policy in mt-txqueue is (priority + replace-by-key).
     static const uint8_t TXQ_N = 16;
-    TxItem   _txq[TXQ_N];
-    uint8_t  _txHead = 0, _txCount = 0;
+    typedef mttx::TxQueue<TXQ_N, FRAME_CAP> TxQ;
+    typedef TxQ::Item TxItem;
+    TxQ _txq;
     TxState  _txState = TX_IDLE;
     uint32_t _txStateMs = 0;          // when the current SCANNING/SENDING began (timeout safety)
     float    _freqMHz = 0.0f;         // stored from region in begin(); exposed via freqMHz() for the firmware's resetAGC()
