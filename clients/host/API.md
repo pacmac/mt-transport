@@ -164,6 +164,9 @@ mechanics — no ports, frames, channels or queues cross this boundary.
 | `POST /v1/mesh/mode` | `{unit, mode: dev\|live\|auto}` |
 | `GET /v1/mesh/images/:target` | list images held on a unit — **needs a live round-trip** |
 | `GET /v1/mesh/images/:target/:pid` | image bytes (`image/jpeg`) — **needs a live round-trip** |
+| `GET /v1/mesh/schema/:target` | **the device's self-describing field table** — served from cache, see below |
+| `GET /v1/mesh/config/:target` | current config values — **needs a live round-trip** |
+| `POST /v1/mesh/config/:target` | `{field: value, …}` — schema-validated write |
 
 `:target` accepts the full `!8cee336b` **or** the 4-hex short form `336b`.
 
@@ -176,6 +179,40 @@ Check `GET /v1/mesh/mode/:target` → `awake` first, or queue a command instead.
 an **id** immediately and is delivered in the unit's next wake window. Poll
 `GET /v1/mesh/queue` or watch events for the receipt. Do not expect a synchronous
 device reply.
+
+### Config schema — build your form from the DEVICE, not a hardcoded list
+
+`GET /v1/mesh/schema/:target` returns the device's own description of every settable
+field, so a config UI is generated rather than maintained:
+
+```json
+{ "ver": 3, "fetchedAt": 1784969000000, "fields": [
+  { "id": "alm.ovr", "ty": "n", "label": "Over-temp", "def": 30,
+    "writable": true, "min": 0, "max": 100, "bounded": true }
+]}
+```
+
+`ty` is `n` numeric · `b` boolean · `t` text. `bounded` says whether `min`/`max` apply.
+A field added in firmware appears in your UI with **no dashboard change** — that is the
+point of exposing it.
+
+**It is served from a PERSISTENT cache, and that is not an optimisation.** The schema is
+pulled off the device by `sch` page requests, which only work while the unit is **awake**
+— a 15-minute sleeper is unreachable ~99% of the time. So the schema is persisted on
+disk and survives our restarts: without that, a dashboard could not render a config form
+until the unit happened to wake. Resolution order is hot cache → disk → device.
+
+- The schema only changes when **firmware** changes, so a cached copy stays valid.
+- After a flash, force a re-pull with `?refresh=1`.
+- If the device is unreachable and we hold no copy for it, you may get another unit's
+  cached schema flagged **`"stale": true`** — the schema is firmware-global, so a
+  sibling's copy describes it. A flagged form beats a blank page; check the flag.
+- Only if nothing is cached anywhere do you get `504`.
+
+**Writes:** `POST /v1/mesh/config/:target` with a `{field: value}` patch. We validate
+against the schema and map each field to its own device verb. **Do not build port-260
+`{"type":"set"}` payloads** — that channel is unreachable over the text gateway. This
+route is the supported path.
 
 Events: `mesh.node`, `mesh.reply`, `mesh.detection`, `mesh.alert`,
 `mesh.image-available`, `mesh.image`, `mesh.error`.

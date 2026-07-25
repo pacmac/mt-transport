@@ -86,6 +86,8 @@ namespace. One PM2 app.
 | `GET /v1/mesh/nodes`, `GET /v1/mesh/queue` | reads |
 | `POST /v1/mesh/queue`, `/command`, `/mode` | commands (mutate a real radio) |
 | `GET /v1/mesh/images/:pid` | binary body — **never** on the event stream |
+| `GET /v1/mesh/schema/:target` | device self-describing field table (**persistently cached** — see below) |
+| `GET|POST /v1/mesh/config/:target` | read / schema-validated write of device config |
 | `GET /v1/recorder/...` | trial-logger reads |
 | `GET /v1/events` | **SSE**, all modules, namespaced |
 
@@ -115,6 +117,25 @@ SSE frame: `id: <monotonic>`, `event: <namespaced>`, `data: <json>`.
    butler continuity across the switch** (the recorder must not lose a day, and queued
    commands must survive).
 7. `API.md` — the consumer contract.
+
+## Schema cache — a correctness requirement, not an optimisation
+
+The device's config schema is pulled by `sch` page requests, which need the unit
+**awake**. A 15-minute sleeper is unreachable ~99% of the time, so an in-memory cache
+(what `lib/config.js` had) is empty after every service restart — meaning a dashboard
+could not render a config form until the unit happened to wake.
+
+So the schema is **persisted** (`PayloadStore.saveSchema/loadSchema`) and resolution is
+hot cache → disk → device. Two further properties, both deliberate:
+
+- The schema is **firmware-global** (identical across units on a build), so if we hold
+  no copy for a unit we fall back to any sibling's, flagged `stale: true`. A flagged
+  form beats a blank page — but the flag must be honest, hence it is on the wire.
+- If nothing is cached anywhere we still throw, so the caller gets a `504` rather than a
+  fabricated empty schema. Never invent a schema.
+
+`?refresh=1` forces a re-pull, which is what a firmware flash requires — a stale schema
+would render a form that no longer matches the device.
 
 ## Observe
 1. **Static** — one PM2 app; no `process.cwd()` in the config path; no `console.*`/

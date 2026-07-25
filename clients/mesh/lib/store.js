@@ -81,6 +81,50 @@ class PayloadStore {
 
   // Command-butler queue — persistent per-unit command ledger. Survives restart, so a command
   // queued for a unit that wakes in hours is still there. One `queue.json` per unit dir.
+  // ---- device config SCHEMA -------------------------------------------------
+  // The schema describes the device's own settable fields (id/type/label/default/
+  // bounds). It is fetched by pulling `sch` pages OFF THE DEVICE, which only works
+  // while the unit is awake — and a sleeping unit is unreachable ~99% of the time.
+  // An in-memory cache therefore is not enough: after a service restart the schema
+  // would be gone and a dashboard could not render a config form until the unit next
+  // woke. So it is persisted here and survives restarts.
+  //
+  // Stored per node, but the schema is FIRMWARE-GLOBAL (identical across units on the
+  // same build), so `ver` is recorded and a sibling's copy can satisfy a unit we have
+  // never successfully polled — see Config.schema().
+  _schemaPath(node) {
+    const sub = path.join(this.dir, String(node).replace(/[^\w!-]/g, '_'));
+    return { sub, file: path.join(sub, 'schema.json') };
+  }
+
+  saveSchema(node, schema) {
+    const p = this._schemaPath(node);
+    fs.mkdirSync(p.sub, { recursive: true });
+    fs.writeFileSync(p.file, JSON.stringify({ ...schema, fetchedAt: Date.now() }));
+  }
+
+  loadSchema(node) {
+    const p = this._schemaPath(node);
+    try { return JSON.parse(fs.readFileSync(p.file, 'utf8')); }
+    catch { return null; }   // absent or corrupt: treat as "no cache", never throw
+  }
+
+  // Any persisted schema, newest first — used as a fallback for a unit we have never
+  // polled, since the schema is firmware-global.
+  anySchemas() {
+    const out = [];
+    let subs = [];
+    try { subs = fs.readdirSync(this.dir, { withFileTypes: true }).filter((d) => d.isDirectory()); }
+    catch { return out; }
+    for (const d of subs) {
+      try {
+        const j = JSON.parse(fs.readFileSync(path.join(this.dir, d.name, 'schema.json'), 'utf8'));
+        if (j && Array.isArray(j.fields)) out.push({ node: d.name, ...j });
+      } catch { /* skip */ }
+    }
+    return out.sort((a, b) => (b.fetchedAt || 0) - (a.fetchedAt || 0));
+  }
+
   _queuePath(node) {
     return path.join(this.dir, String(node).replace(/[^\w!-]/g, '_'), 'queue.json');
   }

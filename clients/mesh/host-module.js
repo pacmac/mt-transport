@@ -121,6 +121,32 @@ module.exports = {
           return mesh.setUnitMode(body.unit, body.mode);
         }],
 
+        // ---- config: the device's SELF-DESCRIBING field table -----------------
+        // The device publishes its own schema over `sch` pages — id, type, label,
+        // default, writability and bounds — so a dashboard builds its config form
+        // from the DEVICE rather than from a hardcoded list that silently rots.
+        // That is the whole point of exposing it here: a field added in firmware
+        // appears in the UI with no dashboard change.
+        //
+        // Writes go through `set`, which maps each field to its OWN TEXT VERB
+        // (lib/config.js `map.writeVerb`). The uniform {type:set} port-260 channel
+        // is unreachable over the text-only gateway, so consumers must never try to
+        // build that payload themselves — this route is the supported path.
+        ['GET', '/schema/:target', async ({ params, query }) => {
+          try { return await mesh.getSchema(params.target, { refresh: query.get('refresh') === '1' }); }
+          catch (e) { return deviceUnreachable(e, params.target); }
+        }],
+        ['GET', '/config/:target', async ({ params }) => {
+          try { return await mesh.getConfig(params.target); }
+          catch (e) { return deviceUnreachable(e, params.target); }
+        }],
+        ['POST', '/config/:target', async ({ params, body }) => {
+          if (!body || typeof body !== 'object' || !Object.keys(body).length)
+            return reply(400, { error: 'need a {field: value} patch' });
+          try { return await mesh.setConfig(params.target, body); }
+          catch (e) { return deviceUnreachable(e, params.target); }
+        }],
+
         // ---- images: metadata on the stream, BYTES over HTTP -----------------
         // These need a LIVE round-trip to the unit, so a sleeping unit cannot answer:
         // it is deaf outside its ~8 s wake window. That is 504 (upstream did not

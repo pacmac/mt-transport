@@ -73,7 +73,8 @@ class Config {
     this.send = deps.send;                       // (node,text) => fire-and-forget (DM path)
     this.log = deps.log || { debug() {}, info() {}, warn() {} };
     this.schemaTimeoutMs = deps.schemaTimeoutMs || 8000;
-    this._schema = new Map();                    // node -> { ver, fields:[...] }
+    this.store = deps.store || null;             // persists the schema across restarts
+    this._schema = new Map();                    // node -> { ver, fields:[...] } (hot cache)
     this._pending = new Map();                   // node -> Map(page -> resolve)
   }
 
@@ -113,9 +114,27 @@ class Config {
   }
 
   // ---- schema: the device's own field table (pull-paginated, cached) ----------
+  // Resolution order: hot cache -> PERSISTED cache -> pull from the device.
+  //
+  // The persisted step is what makes this usable at all. Pulling `sch` pages needs the
+  // unit AWAKE, and a 15-minute sleeper is unreachable ~99% of the time — so without a
+  // cache that survives a service restart, a dashboard could not render a config form
+  // until the unit happened to wake. The schema only changes when firmware changes, so
+  // a cached copy is valid indefinitely; `refresh` forces a re-pull after a flash.
+  //
+  // If the device cannot be reached we RETURN THE CACHE rather than throwing, flagged
+  // `stale: true` so the caller can say "from cache" instead of showing an error.
   async schema(node, { refresh = false } = {}) {
-    const cached = this._schema.get(node);
-    if (cached && !refresh) return cached;
+    if (!refresh) {
+      const hot = this._schema.get(node);
+      if (hot) return hot;
+      const disk = this.store && this.store.loadSchema(node);
+      if (disk && Array.isArray(disk.fields)) {
+        this._schema.set(node, disk);
+        return disk;
+      }
+    }
+
     this._pending.set(node, new Map());
     try {
       const rows = [];
@@ -127,9 +146,25 @@ class Config {
         const f = Array.isArray(frame.f) ? frame.f : [];
         for (let i = 1; i < f.length; i++) rows.push(f[i]);   // skip the header row on each page
       }
-      const schema = { ver, fields: rows.map(parseRow).filter(Boolean) };
+      const schema = { ver, fields: rows.map(parseRow).filter(Boolean), fetchedAt: Date.now() };
       this._schema.set(node, schema);
+      if (this.store) {
+        try { this.store.saveSchema(node, schema); }
+        catch (e) { this.log.warn('schema persist failed: %s', e && e.message); }
+      }
       return schema;
+    } catch (e) {
+      // Unreachable. Fall back to ANY persisted schema — it is firmware-global, so a
+      // sibling unit's copy describes this one too. Better a flagged stale form than
+      // no form at all; the alternative is a dashboard that is blank until the unit
+      // next wakes.
+      const disk = (this.store && this.store.loadSchema(node))
+        || (this.store && this.store.anySchemas()[0]) || null;
+      if (disk && Array.isArray(disk.fields)) {
+        this.log.info('schema: %s unreachable, serving cached ver %s', node, disk.ver);
+        return { ...disk, stale: true, error: (e && e.message) || String(e) };
+      }
+      throw e;                       // nothing cached anywhere: the caller gets the 504
     } finally {
       this._pending.delete(node);
     }

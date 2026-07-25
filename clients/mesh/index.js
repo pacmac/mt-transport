@@ -76,6 +76,10 @@ class Mesh extends EventEmitter {
       send: (node, text) => this._sendRaw(node, text),      // `sch` pages: fire-and-forget over the DM path
       log: require('./lib/log').log.child('config'),
       schemaTimeoutMs: this.cfg.timing && this.cfg.timing.chunkAnswerMs,
+      // Persist the schema: pulling it needs the unit awake, and a sleeper is
+      // unreachable ~99% of the time, so an in-memory cache would be empty after
+      // every service restart. See Config.schema().
+      store: this.images && this.images.store,
     });
     // Command butler: per-unit queue, delivered into the wake window ('heard'). deliver = the
     // idempotent PKC-DM command path (one attempt per window; the butler owns cross-window retry).
@@ -305,7 +309,11 @@ class Mesh extends EventEmitter {
   }
 
   // ---- config (mesh-config phase) ----
-  async getSchema(node) { return this.config.schema(node); }        // device field table (cached)
+  // Device field table (id/type/label/default/writable/bounds). CACHED, because it
+  // costs one `sch` page-pull round-trip per page. opts.refresh forces a re-pull —
+  // needed after a firmware update, since a new build can add or change fields and a
+  // stale cached schema would render a form that no longer matches the device.
+  async getSchema(node, opts) { return this.config.schema(node, opts); }
   async getConfig(node) { return this.config.get(node); }           // { values, unread }
   async setConfig(node, patch) { return this.config.set(node, patch); } // schema-validated, then confirmed
 
