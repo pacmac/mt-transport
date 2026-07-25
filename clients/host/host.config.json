@@ -1,0 +1,6 @@
+{
+  "logLevel": "info",
+  "http": { "host": "127.0.0.1", "port": 8788 },
+  "events": { "bufferSize": 500 },
+  "modules": {}
+}

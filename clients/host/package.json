@@ -1,0 +1,16 @@
+{
+  "name": "@pac/host",
+  "version": "0.1.0",
+  "description": "The one service. Loads the mesh and recorder modules in-process and publishes a single versioned API (REST + SSE) on one port. Consumers CONNECT to it and never import our code: this process is the single owner of the mesh-gw connection, the butler queue, the image store and the node model, so there can only ever be one of it.",
+  "keywords": ["meshtastic", "lora", "service", "api", "sse"],
+  "author": "Peter",
+  "license": "MIT",
+  "main": "index.js",
+  "bin": { "pac-host": "bin/pac-host.js" },
+  "scripts": {
+    "start": "node bin/pac-host.js",
+    "test": "node test/offline_sse.js && node test/offline_host.js"
+  },
+  "dependencies": {},
+  "engines": { "node": ">=18" }
+}
