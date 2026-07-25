@@ -15,6 +15,15 @@ const { SseHub } = require('./lib/sse');
 
 const API = '/v1';
 
+// Marks a handler return as a RESPONSE ENVELOPE rather than domain data. A symbol,
+// because any field name we might have duck-typed on (status/body/raw) is one a real
+// domain object is entitled to use.
+const ENVELOPE = Symbol('pac-host.response');
+
+// Build an explicit response. Handlers that just return data need neither.
+const reply  = (status, body) => ({ [ENVELOPE]: true, status, body });
+const binary = (raw, contentType) => ({ [ENVELOPE]: true, status: 200, raw, contentType });
+
 class Host {
   // opts: { config, log, sse }
   constructor(opts = {}) {
@@ -189,11 +198,15 @@ function readJson(req) {
   });
 }
 
-// A handler returns plain data (JSON), or { status?, body?, raw?, contentType? }.
-// `raw` is how binary leaves the service — images are fetched over HTTP, never
-// pushed through the event stream.
+// A handler returns PLAIN DATA (serialised as JSON), or an explicit envelope built
+// with reply()/binary().
+//
+// The envelope is marked with a SYMBOL, never duck-typed. Detecting it by looking for
+// `status`/`body`/`raw` fields collides with real domain data: a mesh node object
+// carries a `raw` passthrough, so `GET /v1/mesh/nodes/:target` was mistaken for a
+// binary response and threw. Domain objects are free to use any field name they like.
 function respond(res, out) {
-  if (out && typeof out === 'object' && (out.raw !== undefined || out.status !== undefined || out.body !== undefined)) {
+  if (out && typeof out === 'object' && out[ENVELOPE]) {
     const status = out.status || 200;
     if (out.raw !== undefined) {
       const buf = Buffer.isBuffer(out.raw) ? out.raw : Buffer.from(out.raw);
@@ -219,4 +232,4 @@ function childLog(log, name) {
   return { info: at('info'), warn: at('warn'), debug: at('debug'), error: at('error') };
 }
 
-module.exports = { Host, SseHub, API };
+module.exports = { Host, SseHub, API, reply, binary, ENVELOPE };

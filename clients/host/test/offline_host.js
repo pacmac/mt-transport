@@ -5,7 +5,7 @@
 'use strict';
 const assert = require('assert');
 const http = require('http');
-const { Host } = require('../index');
+const { Host, binary } = require('../index');
 
 let checks = 0;
 const ok = (c, m) => { assert(c, m); checks++; };
@@ -44,7 +44,9 @@ function post(port, path, obj) {
           ['GET', '/items', async () => [{ id: 1 }, { id: 2 }]],
           ['GET', '/items/:id', async ({ params }) => ({ id: params.id })],
           ['POST', '/items', async ({ body }) => ({ created: body.name })],
-          ['GET', '/blob', async () => ({ raw: Buffer.from([1, 2, 3]), contentType: 'application/octet-stream' })],
+          ['GET', '/blob', async () => binary(Buffer.from([1, 2, 3]), 'application/octet-stream')],
+          // Domain data that happens to use the old duck-typed field names.
+          ['GET', '/domainish', async () => ({ raw: { nested: true }, status: 'ready', body: 'text' })],
           ['GET', '/boom', async () => { throw new Error('handler exploded'); }],
         ],
         async stop() { good.stopped = true; },
@@ -96,6 +98,19 @@ function post(port, path, obj) {
     const r = await get(port, '/v1/demo/blob');
     ok(r.headers['content-type'] === 'application/octet-stream', 'binary content-type');
     ok(r.headers['content-length'] === '3', 'binary length correct');
+  }
+
+  // ---- REGRESSION: domain data is NOT an envelope ---------------------------
+  // The envelope used to be duck-typed on status/body/raw. A mesh node object
+  // carries a `raw` passthrough, so GET /v1/mesh/nodes/:target was mistaken for a
+  // binary response and threw. Domain objects may use ANY field name.
+  {
+    const r = await get(port, '/v1/demo/domainish');
+    ok(r.status === 200, 'domain object with raw/status/body fields returns 200');
+    const b = JSON.parse(r.body);
+    ok(b.raw && b.raw.nested === true, 'a domain `raw` field survives as DATA, not a binary body');
+    ok(b.status === 'ready', 'a domain `status` field is not read as an HTTP status');
+    ok(b.body === 'text', 'a domain `body` field is not read as a response body');
   }
 
   // ---- a throwing handler is a 500, and the host stays up -------------------

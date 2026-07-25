@@ -13,6 +13,7 @@
 // butlers delivering to the same radio units.
 'use strict';
 const { Mesh } = require('./index');
+const { reply, binary } = require('../host');
 const { log: rootLog } = require('./lib/log');
 
 // Internal event -> wire name. EXPLICIT ON PURPOSE: internal names are ours to change,
@@ -55,7 +56,9 @@ module.exports = {
     const subs = [];
     for (const [internal, wire] of Object.entries(WIRE_EVENTS)) {
       const handler = internal === 'reply'
-        ? (reply, from) => safe(ctx, wire, { from, reply })
+        // NB: named replyObj, not `reply` — that would shadow the reply() response
+        // helper imported above, which is exactly the kind of trap that bites later.
+        ? (replyObj, from) => safe(ctx, wire, { from, reply: replyObj })
         : internal === 'error'
           // An Error's .message is non-enumerable and would vanish through a spread.
           ? (err) => safe(ctx, wire, { error: (err && err.message) || String(err) })
@@ -74,9 +77,14 @@ module.exports = {
         // ---- reads ----------------------------------------------------------
         ['GET', '/nodes', async () => mesh.nodes()],
         ['GET', '/nodes/:target', async ({ params }) => {
-          const node = await mesh.node(params.target);
-          if (!node) return { status: 404, body: { error: 'unknown node' } };
-          return { ...node, ...(await mesh.unitInfo(params.target)) };
+          // Resolve FIRST: mesh.node() matches only a full '!id' or num, while callers
+          // (and every other route here) accept the 4-hex short form too. Looking up
+          // before resolving made /nodes/336b 404 while /mode/336b worked — the same
+          // target, two answers.
+          const info = await mesh.unitInfo(params.target);
+          const node = info && info.id ? await mesh.node(info.id) : null;
+          if (!node) return reply(404, { error: 'unknown node', target: params.target });
+          return { ...node, ...info };
         }],
         ['GET', '/queue', async () => mesh.queueList()],
         ['GET', '/queue/:target', async ({ params }) => mesh.queueList(params.target)],
@@ -86,39 +94,48 @@ module.exports = {
         // Queued: returns an id immediately; the unit may be asleep and the command
         // lands in its next wake window. Asynchronous by nature — see API.md 6.1.
         ['POST', '/queue', async ({ body }) => {
-          if (!need(body, 'unit', 'verb')) return { status: 400, body: { error: 'need {unit, verb, args?, ttlMs?, maxAttempts?}' } };
+          if (!need(body, 'unit', 'verb')) return reply(400, { error: 'need {unit, verb, args?, ttlMs?, maxAttempts?}' });
           return mesh.queueCommand(body.unit, body.verb, body.args || [], {
             ttlMs: body.ttlMs, maxAttempts: body.maxAttempts,
           });
         }],
         ['DELETE', '/queue/:id', async ({ params }) => {
           const c = mesh.queueCancel(params.id);
-          return c || { status: 404, body: { error: 'not pending / unknown id' } };
+          return c || reply(404, { error: 'not pending / unknown id' });
         }],
         // live/dev routed: dev units answer directly, live units are queued.
         ['POST', '/command', async ({ body }) => {
-          if (!need(body, 'unit', 'verb')) return { status: 400, body: { error: 'need {unit, verb, args?, force?}' } };
+          if (!need(body, 'unit', 'verb')) return reply(400, { error: 'need {unit, verb, args?, force?}' });
           try {
             return await mesh.dispatch(body.unit, body.verb, body.args || [], {
               force: !!body.force, noReply: body.noReply,
             });
           } catch (e) {
             // ELIVE = refused because the unit is live and this needed dev routing.
-            return { status: e && e.code === 'ELIVE' ? 409 : 502, body: { error: (e && e.message) || String(e), code: e && e.code } };
+            return reply(e && e.code === 'ELIVE' ? 409 : 502, { error: (e && e.message) || String(e), code: e && e.code });
           }
         }],
         ['POST', '/mode', async ({ body }) => {
           if (!body || !body.unit || !['dev', 'live', 'auto'].includes(body.mode))
-            return { status: 400, body: { error: 'need {unit, mode: dev|live|auto}' } };
+            return reply(400, { error: 'need {unit, mode: dev|live|auto}' });
           return mesh.setUnitMode(body.unit, body.mode);
         }],
 
         // ---- images: metadata on the stream, BYTES over HTTP -----------------
-        ['GET', '/images/:target', async ({ params }) => mesh.listImages(params.target)],
+        // These need a LIVE round-trip to the unit, so a sleeping unit cannot answer:
+        // it is deaf outside its ~8 s wake window. That is 504 (upstream did not
+        // respond in time), never 500 — nothing is broken, the radio is simply asleep.
+        // A caller should check GET /mesh/mode/:target ('awake') before asking.
+        ['GET', '/images/:target', async ({ params }) => {
+          try { return await mesh.listImages(params.target); }
+          catch (e) { return deviceUnreachable(e, params.target); }
+        }],
         ['GET', '/images/:target/:pid', async ({ params }) => {
-          const buf = await mesh.getImage(params.target, params.pid);
-          if (!buf) return { status: 404, body: { error: 'unknown image' } };
-          return { raw: buf, contentType: 'image/jpeg' };
+          try {
+            const buf = await mesh.getImage(params.target, params.pid);
+            if (!buf) return reply(404, { error: 'unknown image' });
+            return binary(buf, 'image/jpeg');
+          } catch (e) { return deviceUnreachable(e, params.target); }
         }],
       ],
 
@@ -137,4 +154,16 @@ module.exports = {
 function safe(ctx, wire, payload) {
   try { ctx.bus.emit(wire, payload); }
   catch (e) { ctx.log.warn('event %s dropped: %s', wire, e && e.message); }
+}
+
+// A unit that did not answer is not a server fault. Distinguish it clearly so a
+// dashboard can say "asleep / unreachable" instead of showing an error.
+function deviceUnreachable(e, target) {
+  const msg = (e && e.message) || String(e);
+  const timedOut = /timeout|timed out/i.test(msg);
+  return reply(timedOut ? 504 : 502, {
+    error: timedOut ? 'unit did not answer' : msg,
+    target,
+    detail: timedOut ? 'the unit is asleep or out of range; it answers only in its wake window' : undefined,
+  });
 }
