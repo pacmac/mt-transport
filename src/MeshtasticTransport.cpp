@@ -42,6 +42,7 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
                          1.8f /* DIO3 TCXO */, false /* DCDC, not LDO */);
     if (st != RADIOLIB_ERR_NONE)
         return false;
+    _txDbm = txDbm;                 // what begin() actually applied; setTxPower may change it
     radio.setCurrentLimit(140.0f);
     radio.setDio2AsRfSwitch(true);
     radio.setCRC(RADIOLIB_SX126X_LORA_CRC_ON);
@@ -77,6 +78,20 @@ bool MeshtasticTransport::begin(SX1262 &radio, const RegionParams &region,
         _rxActive = true;
     _freqMHz = region.freqMHz;     // exposed via freqMHz() for the firmware's resetAGC()
     return true;
+}
+
+// Runtime TX power. RadioLib range-checks (-9..+22) and reprograms the PA config; we only
+// adopt the value once it has accepted it, so txPower() can never report a setting the
+// radio refused. A frame already in flight is unaffected — the next transmission uses the
+// new setting.
+int16_t MeshtasticTransport::setTxPower(int8_t dbm)
+{
+    if (!_radio)
+        return RADIOLIB_ERR_WRONG_MODEM;
+    int16_t st = _radio->setOutputPower(dbm);
+    if (st == RADIOLIB_ERR_NONE)
+        _txDbm = dbm;
+    return st;
 }
 
 bool MeshtasticTransport::setPkiIdentity(const uint8_t privateKey[32])

@@ -62,6 +62,22 @@ public:
     bool begin(SX1262 &radio, const RegionParams &region, const MeshChannel &ch,
                uint32_t nodeNum, uint32_t (*rng)(), int8_t txDbm = 2);
 
+    // Change TX power at RUNTIME. begin() took txDbm and offered no way to alter it
+    // afterwards, so link margin could only be characterised by moving hardware.
+    //
+    // Range is -9 .. +22 dBm — that is the SX1262's own limit
+    // (SX1262::checkOutputPower is RADIOLIB_CHECK_RANGE(power, -9, 22), and its PA
+    // optimisation table is indexed paOptTable[power + 9]). Out-of-range is REFUSED by
+    // RadioLib and reported back here; the stored value is only updated on success, so
+    // txPower() never claims a setting the radio rejected.
+    //
+    // The USEFUL direction is DOWN: we already run +22, the ceiling. Attenuation is a
+    // measurement instrument. Whether it is SAFE to attenuate a given unit is a policy
+    // question the caller owns — the firmware gates this on the unit's site role, since
+    // a deployed unit dropped off the mesh cannot be commanded back up.
+    int16_t setTxPower(int8_t dbm);
+    int8_t  txPower() const { return _txDbm; }
+
     // Encrypt and transmit one packet, blocking. payload = the app-level
     // protobuf bytes (an encoded Telemetry, User, or raw bytes for e.g.
     // DETECTION_SENSOR_APP); this wraps them in Data{portnum, payload} —
@@ -307,6 +323,7 @@ public:
 
 private:
     SX1262      *_radio = nullptr;
+    int8_t       _txDbm = 0;      // what the radio is ACTUALLY set to (see setTxPower)
     MeshChannel  _ch{};
     uint32_t     _nodeNum = 0;
     uint32_t (*_rng)() = nullptr;
