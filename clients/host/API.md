@@ -237,6 +237,27 @@ unit's next transmission and therefore unknowable. `null` means "on its next wak
 **not** "never". Pair it with `tries`/`maxTries` if you want to show progress; with a
 15-minute heartbeat the gap between attempts is minutes, not seconds.
 
+**Which timestamp to display — `createdAt` and `settledAt` are routinely an HOUR apart.**
+There are four, and picking the wrong one is easy because the names do not warn you:
+
+| field | meaning |
+|---|---|
+| `createdAt` | when a person or process **asked for** it |
+| `triedAt` | the **most recent** delivery attempt |
+| `nextTryAt` | when the next attempt is due (`null` = next wake window) |
+| `settledAt` | when it **finished** — reply received, or given up |
+
+- **For a settled request (`done`/`sent`/`failed`/`expired`), show `settledAt`.** That is
+  when the answer actually arrived.
+- **For a live request (`queued`/`trying`), show `createdAt`** — how long it has been
+  waiting is the useful number there.
+
+This matters far more than it looks. A command to a sleeping unit waits for a wake window,
+so the gap is not seconds: a real ping was queued at 21:45 and settled at 22:51 — **66
+minutes**. Aged by `createdAt` it renders as "1h ago · done", i.e. as though the reply
+arrived an hour ago, when it had just landed. If you want the wait itself, it is
+`settledAt - createdAt`; say so and we will serve it directly rather than have you compute it.
+
 Requests are retained per unit — the most recent `store.keepPerUnit` **settled** rows
 (default 500), pruned once at startup. Anything still `queued` or `trying` is never
 dropped: it is an instruction someone gave.

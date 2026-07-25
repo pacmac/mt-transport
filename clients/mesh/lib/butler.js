@@ -196,6 +196,21 @@ class Butler extends EventEmitter {
     // released in the finally, so this can never pick a row whose send is actually in air.
     const next = this._entries(unit).find((e) => e.state === 'queued' || e.state === 'trying');
     if (!next) return;
+    // NEVER attempt a row that has already used its budget. The selector matches on STATE, so
+    // a row interrupted at tries == maxTries (a restart mid-attempt) would otherwise be picked
+    // up, incremented PAST maxTries, and only settled after that extra attempt — observed live
+    // as tries=6/5. That is not a harmless spare transmission: without the restart the row
+    // would have been `failed` at try 5, and the reply that did arrive would have had no live
+    // row to attach to. Settle it here instead (audit-260725a-truth step 5).
+    if (next.tries >= next.maxTries) {
+      next.state = 'failed'; next.settledAt = Date.now(); next.nextTryAt = null;
+      next.error = next.error || { code: 'no_reply', message: 'gave up after the last attempt' };
+      this._persist(unit);
+      this.emit('failed', next);
+      this.log.warn('butler: %s for %s already used %d/%d attempts — settling failed, not retrying',
+        next.verb || 'text', unit, next.tries, next.maxTries);
+      return;
+    }
     this.inflight.add(unit);
     next.state = 'trying'; next.tries++; next.triedAt = Date.now(); next.nextTryAt = null;
     this._persist(unit);

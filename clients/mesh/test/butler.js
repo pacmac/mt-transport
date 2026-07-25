@@ -231,6 +231,27 @@ function memStore() {
     ok(store.loadQueue('!mm')[0].state === 'done', 'restart: the outcome is persisted');
   }
 
+  // 13b. A row that has ALREADY used maxTries must never be attempted again. A restart
+  //      mid-attempt leaves exactly that: state `trying`, tries == maxTries. The selector
+  //      matches on state, so without a guard it gets one free extra attempt — observed
+  //      live as tries=6/5 (audit-260725a-truth step 5). It must settle `failed` instead.
+  {
+    const store = memStore();
+    store.saveQueue('!nn', [{
+      id: 'spent.0', unit: '!nn', kind: 'command', verb: 'ping', args: [],
+      state: 'trying', createdAt: Date.now(), ttlMs: 86400000,
+      tries: 5, maxTries: 5, triedAt: Date.now(), settledAt: null, result: null, error: null,
+    }]);
+    let delivered = 0;
+    const b = new Butler({ deliver: async () => { delivered++; return { ok: true }; }, store });
+    await b.onHeard('!nn');
+    const e = b.get('spent.0');
+    ok(delivered === 0, 'exhausted: deliver() is NOT called for a row already at maxTries');
+    ok(e.state === 'failed' && e.tries === 5, 'exhausted: it settles failed, tries never exceeds maxTries');
+    ok(e.settledAt != null, 'exhausted: it is settled, not left live forever');
+    ok(store.loadQueue('!nn')[0].state === 'failed', 'exhausted: persisted');
+  }
+
   // ---- flood guards (spec: butler-collapse-duplicates) --------------------------------
   // A real incident: 55 identical commands were queued because a wait-loop used a POST as
   // its poll condition. Nothing was broken — the service did exactly as asked — so the

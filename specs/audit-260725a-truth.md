@@ -5,18 +5,19 @@ status: IMPLEMENTED 2026-07-25. VERIFIED LIVE on the running pac-host:
   `/schema/336b` went from stale=None to **stale=True with unitFw='2-260725-20'** — the check
   shipped that morning was inert on the deployed unit and now works; labels corrected; the
   in-flight ping survived the restart reading `trying` with tries and nextTryAt. Suite 19 files
-  green (butler 49->56, devices 31->40).
+  green (butler 49->60, devices 31->40). ADDENDUM 22:57: two further defects found live after the
+  first commit (extra delivery attempt; settled rows aged by createdAt) fixed in the same pass.
 source_hash:
   clients/mesh/index.js              3830d6273c20af51
-  clients/mesh/lib/butler.js         2feda9b30bcc8c07
+  clients/mesh/lib/butler.js         b4fdfa41911f9166   # updated by the 22:57 addendum
   clients/mesh/lib/store.js          b161b0c92241f355
   clients/mesh/lib/db.js             c3bb7766132d0feb
   clients/mesh/lib/settings.js       c1323ebac351ad23
   clients/mesh/config.yaml           1621b29c5fc9b0ec
   clients/host/host.config.json      8b8e703836d34fa0
-  clients/host/API.md                2cda379956d5babc
+  clients/host/API.md                d533658f2c7a55f5   # updated by the 22:57 addendum
   clients/mesh/test/devices.js       18851b505bfa9de2
-  clients/mesh/test/butler.js        db5b6ac289f87bfb
+  clients/mesh/test/butler.js        916e6ec430908aa0   # updated by the 22:57 addendum
 scope:
   - specs/audit-260725a-truth.md
   - clients/mesh/index.js            # fw regex; awake from measurement; prune call
@@ -30,6 +31,11 @@ scope:
   - clients/host/API.md              # `awake`, `fw`, and the state machine are contract
   - clients/mesh/test/devices.js     # asserts awake===false from config mode today — WILL FAIL
   - clients/mesh/test/butler.js      # sticky trying + cancel/expiry of a retrying row
+  # ADDED 22:57 — two more defects found live AFTER the first commit (8f52be0), folded in
+  # rather than deferred, because a deferred finding is a forgotten one:
+  #   5. a restart granted an EXTRA delivery attempt (observed tries=6/5) -> butler.js
+  #   6. settled requests are aged by createdAt, so "1h ago / done" for a command that
+  #      finished 3 minutes ago -> API.md (our half) + a chat item (their half)
 # test/db.js was NOT changed: its pruneRequests coverage already asserts live rows survive,
 #   and that behaviour is untouched.
 # NOT changing:
@@ -231,3 +237,39 @@ pac-host restarted, so `model.lastHeardMs` is empty and every unit correctly rea
 heartbeat to observe. The unit-level behaviour IS covered by test/devices.js 2c, which asserts
 `true` inside `silentMs`, `false` beyond it, and `null` when never heard — including the case
 that caused the bug (`mode: 'live'` override present, heard just now, must be `true`).
+
+## Addendum, 22:57 — two more, found live after the first commit
+
+Peter: *"tomorrow I would have already forgotten it."* Both were captured as mcpp steps
+before any code was touched, then fixed in the same pass.
+
+### 5. A restart granted an extra delivery attempt
+
+Observed on the live ledger at 22:51:20: `ms0u8qv9.0` settled `done` with **`tries: 6/5`**.
+
+`_deliverNext()` selects on *state* and never checks *tries*, so a row interrupted at
+`tries == maxTries` is reloaded, selected, incremented past the limit, and only settled
+`failed` after that extra attempt fails.
+
+**I had already found this during the audit and deliberately deferred it**, reasoning it
+"costs one extra transmission, never a loop". That was wrong, and this run proves it: the
+*only* reason that ping ever succeeded is the restart handing it an attempt it was not
+entitled to. Without the restart it would have been `failed` at try 5, and GARG's pong —
+the first reply in five and three-quarter hours — would have arrived with no live row to
+attach to. A lost receipt, not a spare transmission.
+
+Fixed with a guard at the head of the delivery path: a selected row already at `maxTries`
+is settled `failed` instead of attempted.
+
+### 6. Settled requests are aged by the wrong timestamp
+
+`/control` showed the GARG ping as **"1h ago · done"** when it had settled three minutes
+earlier. That age is `createdAt` (21:45:12), not `settledAt` (22:51:20).
+
+Same shape as the `queued` defect: we return four timestamps with no guidance, so the
+misleading one is the easy one to reach for. On a 15-minute wake window these are routinely
+**an hour apart**, which no consumer would guess from the field names alone.
+
+Our half is the contract — API.md now states which field to render for a settled request,
+and why the two diverge. Which field node-dash's Executed list uses is their code and
+their call; raised on the channel with the measured example rather than asserted.
