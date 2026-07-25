@@ -1,8 +1,5 @@
 gw:
   host: localhost
-  # mesh-gw DIRECT — raw REST + ws:8001/events, owns all BLE (device-comms.md:53).
-  # NEVER route via node-dash (:8000): we must not depend on their service. node-dash may depend on
-  # our libs; never the reverse. Was wrongly :8000 (node-dash proxy) — fixed 2026-07-24.
   port: 8001
   sendPort: 8001
   eventsPath: /events
@@ -24,6 +21,12 @@ timing:
   idleMs: 240000
   pushDeadlineMs: 900000
   pushQuietMs: 15000
+# Command butler. maxPending is a HARD ceiling on UNDELIVERED commands per unit: nothing
+# normal queues ten at one radio (the largest real backlog seen is 1), so hitting it means
+# a caller is looping — treat it as a bug signal, not a limit to raise. Identical pending
+# commands are collapsed before this ever applies.
+butler:
+  maxPending: 10
 retry:
   commands: false
   idempotent: 2
@@ -54,22 +57,17 @@ notify:
       - console
     fault:
       - console
-# OUR alarm devices — the declared half of the device registry (GET /v1/mesh/devices).
-# Keyed by node id; `label` is operator-facing only. Declaring a unit here keeps it in
-# the device list while it is ASLEEP; the other half is learned from 260/261 traffic.
-# The gateway (!2687afb1) is NOT listed: it is our radio, not one of our devices.
-# Alignment: which physical antenna is which, keyed by NODE ID (an id survives a MAC
-# change, and keeps identity out of code). The labels are the view-model field names —
-# `yagi` feeds yagi_q, `omni` feeds omni_q.
 align:
   radios:
     omni: "!2687afb1"
     yagi: "!fa39f7b4"
 devices:
-  "!8cee336b": { label: "Bench alarm" }
-  "!987ab80f": { label: "Garage alarm" }
+  "!8cee336b":
+    label: Bench alarm
+  "!987ab80f":
+    label: Garage alarm
 units:
   "!987ab80f":
     mode: dev
   "!8cee336b":
-    mode: live
+    mode: dev

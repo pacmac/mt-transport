@@ -25,6 +25,12 @@ class Butler extends EventEmitter {
     // maxTries is the name now; maxAttempts is still accepted so an existing config.yaml
     // keeps working rather than silently reverting to the default.
     this.maxTries = c.maxTries != null ? c.maxTries : (c.maxAttempts != null ? c.maxAttempts : 5);
+    // Hard ceiling on UNDELIVERED commands per unit. Nothing in normal operation queues
+    // ten commands at one radio — the largest real backlog observed is 1 — so hitting this
+    // is a BUG SIGNAL (a caller looping), not a capacity problem to be raised away.
+    // Configurable because a limit that lives only in code is one nobody knows they can
+    // change, and it would have to be found by reading source mid-incident.
+    this.maxPending = c.maxPending != null ? c.maxPending : 10;
     this.inflight = new Set();                            // units mid-delivery (one per window)
     this._q = new Map();                                 // unit -> entries[] (mirror of the store)
     this._load();
@@ -55,10 +61,40 @@ class Butler extends EventEmitter {
   // _deliverNext: a command can reach `done`, a text can only ever reach `sent`.
   enqueue(unit, verb, args = [], opts = {}) {
     const kind = opts.kind === 'text' ? 'text' : 'command';
+    const normArgs = kind === 'text' ? [] : (Array.isArray(args) ? args : (args == null || args === '' ? [] : [args]));
+    const live = this._entries(unit).filter((e) => e.state === 'queued' || e.state === 'trying');
+
+    // COLLAPSE an identical command that is still undelivered. It cannot achieve anything
+    // the pending one will not, and a caller polling with a WRITE (which is exactly how 55
+    // strays were created) would otherwise stack one entry per attempt.
+    //
+    // Commands only. TEXT IS EXEMPT: two identical messages are two genuine sends — a
+    // person typing "ok" twice means it twice, and silently swallowing a message is far
+    // worse than a duplicate command.
+    if (kind === 'command' && !opts.force) {
+      const same = live.find((e) => e.kind === 'command' && e.verb === verb
+        && e.args.length === normArgs.length && e.args.every((a, i) => String(a) === String(normArgs[i])));
+      if (same) {
+        this.log.info('butler: %s for %s already queued (id %s) — collapsed, not re-queued', verb, unit, same.id);
+        return { ...same, collapsed: true };
+      }
+    }
+
+    // BACKSTOP for a flood that varies its arguments, which collapse cannot catch.
+    // Throws rather than dropping silently: a caller this far out of control must be told.
+    if (live.length >= this.maxPending) {
+      const err = new Error(
+        `queue full for ${unit}: ${live.length} undelivered commands (max ${this.maxPending}). `
+        + 'This usually means a caller is looping — check for a poll that WRITES instead of reads.');
+      err.code = 'EQUEUEFULL';
+      this.log.warn('butler: REFUSED %s for %s — %d pending, at the cap', verb, unit, live.length);
+      throw err;
+    }
+
     const entry = {
       id: genId(), unit, kind, verb: kind === 'text' ? null : verb,
       body: kind === 'text' ? String(opts.body != null ? opts.body : verb) : null,
-      args: kind === 'text' ? [] : (Array.isArray(args) ? args : (args == null || args === '' ? [] : [args])),
+      args: normArgs,
       state: 'queued', createdAt: Date.now(),
       ttlMs: opts.ttlMs != null ? opts.ttlMs : this.ttlMs,
       tries: 0, maxTries: opts.maxTries != null ? opts.maxTries : (opts.maxAttempts != null ? opts.maxAttempts : this.maxTries),

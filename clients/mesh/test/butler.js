@@ -194,5 +194,87 @@ function memStore() {
     ok(store.loadQueue('!mm')[0].state === 'queued', 'restart: the recovery is persisted');
   }
 
+  // ---- flood guards (spec: butler-collapse-duplicates) --------------------------------
+  // A real incident: 55 identical commands were queued because a wait-loop used a POST as
+  // its poll condition. Nothing was broken — the service did exactly as asked — so the
+  // guard belongs here, not in the caller's discipline.
+
+  // 14. THE REPLAY: 55 identical enqueues must produce exactly ONE entry.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => { await sleep(10000); return {}; }, store });
+    const first = b.enqueue('!nn', 'txp', []);
+    const ids = new Set([first.id]);
+    let collapsed = 0;
+    for (let i = 0; i < 54; i++) {
+      const e = b.enqueue('!nn', 'txp', []);
+      ids.add(e.id);
+      if (e.collapsed) collapsed++;
+    }
+    ok(b.list('!nn').length === 1, 'REPLAY: 55 identical enqueues -> ONE entry');
+    ok(ids.size === 1, 'REPLAY: the same id is returned every time (so polling it works)');
+    ok(collapsed === 54, 'REPLAY: every repeat is flagged collapsed');
+  }
+
+  // 15. Collapse is narrow: a different verb or different args is a different command.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => { await sleep(10000); return {}; }, store });
+    b.enqueue('!oo', 'txp', ['0']);
+    b.enqueue('!oo', 'txp', ['-9']);      // different ARGS
+    b.enqueue('!oo', 'status', []);       // different VERB
+    ok(b.list('!oo').length === 3, 'different verb/args are NOT collapsed');
+  }
+
+  // 16. Once the first is terminal, a repeat is a genuinely new command.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => ({ ok: true }), store });
+    b.enqueue('!pp', 'ping', []);
+    await sleep(20);                       // immediate attempt settles it
+    ok(b.list('!pp')[0].state === 'done', 'precondition: first one settled');
+    const second = b.enqueue('!pp', 'ping', []);
+    ok(!second.collapsed && b.list('!pp').length === 2, 'a repeat AFTER settling is a new command');
+  }
+
+  // 17. TEXT IS EXEMPT — swallowing a duplicate message is worse than a duplicate command.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => { await sleep(10000); return {}; }, store });
+    b.enqueue('!qq', null, [], { kind: 'text', body: 'ok' });
+    b.enqueue('!qq', null, [], { kind: 'text', body: 'ok' });
+    ok(b.list('!qq').length === 2, 'two identical TEXTS are two sends, never collapsed');
+  }
+
+  // 18. force bypasses collapse — a deliberate repeat must stay possible.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => { await sleep(10000); return {}; }, store });
+    b.enqueue('!rr', 'ping', []);
+    const f = b.enqueue('!rr', 'ping', [], { force: true });
+    ok(!f.collapsed && b.list('!rr').length === 2, 'force: true queues a real duplicate');
+  }
+
+  // 19. The cap catches a VARIED flood, which collapse cannot.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => { await sleep(10000); return {}; }, store, cfg: { butler: { maxPending: 10 } } });
+    for (let i = 0; i < 10; i++) b.enqueue('!ss', 'txp', [String(i)]);
+    ok(b.list('!ss').length === 10, 'cap: fills to the limit');
+    let threw = null;
+    try { b.enqueue('!ss', 'txp', ['99']); } catch (e) { threw = e; }
+    ok(threw && threw.code === 'EQUEUEFULL', 'cap: refuses past the limit, with a code');
+    ok(b.list('!ss').length === 10, 'cap: nothing extra was stored');
+  }
+
+  // 20. The cap counts only UNDELIVERED entries — settled history must not block new work.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => ({ ok: true }), store, cfg: { butler: { maxPending: 3 } } });
+    for (let i = 0; i < 8; i++) { b.enqueue('!tt', 'txp', [String(i)]); await sleep(8); }
+    ok(b.list('!tt').filter((e) => e.state === 'done').length >= 5, 'cap: settled entries accumulated');
+    ok(b.enqueue('!tt', 'ping', []).id, 'cap: a new command is still accepted despite long history');
+  }
+
   console.log(`butler OK: ${pass} assertions passed`);
 })().catch((e) => { console.error('butler FAILED:', (e && e.stack) || e); process.exit(1); });

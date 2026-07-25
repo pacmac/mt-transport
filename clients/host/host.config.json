@@ -35,6 +35,8 @@
         "pushDeadlineMs": 900000,
         "pushQuietMs": 15000
       },
+      "butler": { "maxPending": 10 },
+
       "retry": { "commands": false, "idempotent": 2, "attemptTimeoutMs": 10000 },
       "listen": { "autoFetchImages": true, "alerts": ["motion", "fault"] },
 
