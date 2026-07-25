@@ -79,10 +79,47 @@ function mkMesh({ devices = {}, learned = [], dir = tmp('x') } = {}) {
     ok(g.shortName === 'GARG', 'shortName from the roster user block');
     ok(g.fw === '2-260724-3', 'fw parsed from the long name "<suffix> <version>"');
     ok(g.present === true, 'present: true when it is in the roster');
-    ok(g.slp === 1 && g.mode === 'live' && g.awake === false, 'liveness included (no extra /mode call)');
+    // `awake` is a MEASUREMENT: this fixture has never been heard (no lastHeardMs), so the
+    // honest answer is null = UNKNOWN. It must NOT be false just because mode is 'live' —
+    // mode is the operator's routing override and describes no physical fact.
+    ok(g.slp === 1 && g.mode === 'live' && g.awake === null,
+       'liveness included (no extra /mode call); awake is null when never heard, not false');
     ok(Math.abs(g.position.lat - 51.0146831) < 1e-6, 'position decoded from latitude_i');
     ok(Math.abs(g.position.lon - (-3.1282490)) < 1e-6, 'longitude decoded (negative preserved)');
     ok(g.rssi === -120 && g.snr === -14, 'signal carried through for the record');
+  }
+
+  // 2b. `fw` must parse the REAL long-name shapes, not just the degraded hex fallback.
+  //     The old regex demanded a 4-hex prefix — which is the name a unit carries when its
+  //     ROLE NAME HAS NOT BEEN APPLIED — so it parsed only misconfigured units and returned
+  //     null for every correctly-named one. That silently disabled the schema staleness
+  //     check on the deployed unit (audit-260725a-truth). Anchor on the VERSION, not the
+  //     prefix.
+  {
+    const m = mkMesh({ devices: { [GARG]: { label: 'Garage alarm' } } });
+    const fw = (name) => {
+      const mm = typeof name === 'string' ? name.match(/(?:^|\s)(\d+-\d{6}-\d+)\s*$/) : null;
+      return mm ? mm[1] : null;
+    };
+    ok(fw('b80f 2-260725-21') === '2-260725-21', 'fw: hex fallback name still parses');
+    ok(fw('Garage 2-260725-20') === '2-260725-20', 'fw: a ROLE-named unit parses (the old regex returned null)');
+    ok(fw('Bench 2-260725-9') === '2-260725-9', 'fw: single-digit build parses');
+    ok(fw('GARG 2-260725-20') === '2-260725-20', 'fw: short-name prefix parses');
+    ok(fw('B12PAC car') === null, 'fw: a name with no version is null, never a guess');
+    ok(fw('Garage') === null, 'fw: prefix alone is null');
+    ok(fw(null) === null, 'fw: a missing name is null');
+    void m;
+  }
+
+  // 2c. `awake` is a MEASUREMENT. Heard recently => true; heard long ago => false; never
+  //     heard => null. It must never be inferred from cfg mode (audit-260725a-truth).
+  {
+    const m = mkMesh({ devices: { [GARG]: { label: 'Garage alarm' } } });
+    m.cfg.units = { [GARG]: { mode: 'live' } };       // operator override says "live"...
+    m.model.heard(GARG, Date.now());                  // ...but we just heard it
+    ok((await m.devices())[0].awake === true, 'awake: true when heard inside silentMs, DESPITE mode=live');
+    m.model.heard(GARG, Date.now() - 10 * 60 * 1000);
+    ok((await m.devices())[0].awake === false, 'awake: false when last heard beyond silentMs');
   }
 
   // 3. A DECLARED device the gateway has never seen still appears.

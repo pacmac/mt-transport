@@ -200,8 +200,8 @@ GET /v1/mesh/queue?unit=336b&state=queued&kind=text&limit=50&offset=0
 
 | state | what it means |
 |---|---|
-| `queued` | accepted, not tried yet — normally milliseconds |
-| `trying` | attempt in flight |
+| `queued` | accepted, **not tried even once** — normally milliseconds |
+| `trying` | tried at least once, not settled — in flight **or waiting for the next window** |
 | `done` | completed and **confirmed** — `result` holds what came back |
 | `sent` | dispatched, **no confirmation is possible for this kind** — terminal |
 | `failed` | gave up after `tries` |
@@ -220,12 +220,26 @@ Rendering both as "delivered" would show a message as confirmed when nothing con
 against an awake unit you normally get a result in seconds.
 
 **A healthy command to a SLEEPING unit will show `tries: 1` and
-`error.code: "no_reply"` within seconds, then return to `queued`.** That is the first
+`error.code: "no_reply"` within seconds, and then sit in `trying`.** That is the first
 attempt missing a deaf radio — **not a failure**, and it must not be rendered as one.
 Only `failed` and `expired` are real failures.
 
-Requests are retained per unit (most recent ~500 settled); anything not yet settled is
-never dropped.
+**`trying` is STICKY between attempts — changed 2026-07-25, and it is the state you want
+to render.** It used to drop back to `queued` after each failed attempt, which made that
+one word mean both "never attempted" and "3 of 5 attempts made". A dashboard showing the
+state alone therefore displayed a command mid-retry as though nothing had happened —
+observed as `ping · 29m ago · queued` while the record held `tries: 3/5` and an attempt
+9 minutes earlier. Now `queued` means exactly "not yet attempted" and nothing else, so
+**the state field alone is safe to display.**
+
+**`nextTryAt`** — epoch ms when the next attempt is due, or `null` when it is gated on the
+unit's next transmission and therefore unknowable. `null` means "on its next wake window",
+**not** "never". Pair it with `tries`/`maxTries` if you want to show progress; with a
+15-minute heartbeat the gap between attempts is minutes, not seconds.
+
+Requests are retained per unit — the most recent `store.keepPerUnit` **settled** rows
+(default 500), pruned once at startup. Anything still `queued` or `trying` is never
+dropped: it is an instruction someone gave.
 
 ### Devices vs nodes — build your device list dynamically, never from hardcoded ids
 
@@ -246,6 +260,19 @@ so `/devices` answers the different question — *which nodes are the alarm devi
 
 - **`mode`/`awake`/`slp` are included deliberately** so you render a device list in ONE
   call instead of following up with N requests to `/mode/:target`.
+- **`awake` is a MEASUREMENT and is THREE-VALUED — changed 2026-07-25.** `true` = heard
+  within the silence window · `false` = last heard longer ago than that · **`null` = we
+  have never heard this unit, so we cannot say.** Render `null` as *unknown* — not as
+  awake, and not as asleep.
+  It used to be `mode === 'dev'`, i.e. derived from an operator setting in our config file:
+  a unit sitting awake on the desk reported `awake: false` purely because someone had typed
+  `"mode": "live"`. It now describes the device, never the configuration.
+- **`awake` and `slp` are different things.** `awake` is our observation of recent traffic;
+  `slp` is the device's own sleep **setting** as last reported, and is `null` until a reply
+  carries it. Collapsing the two is what produced the bug above.
+- **`mode` is unchanged** and is *not* liveness — it is the command-routing decision
+  (`dev` = send directly, `live` = queue for the wake window), and an operator override
+  wins there on purpose.
 - **`present: false` means we know the device but the gateway has no roster entry** —
   typically a unit that has not been heard since our last restart. It is still listed:
   a device must not disappear from your UI because it is asleep. Signal fields are

@@ -67,11 +67,15 @@ align:
   radios:
     omni: "!2687afb1"
     yagi: "!fa39f7b4"
+# LABELS ENCODE LOCATION, so they must be toggled on every physical swap — exactly like the
+# short name. They were inverted on 2026-07-25: 8cee336b went to the garage and b80f came to
+# the bench, but only the short names and modes were switched. Verified against the reported
+# positions: 8cee336b is 2.501 km from b80f on bearing 301.2 deg (garage -> house).
 devices:
   "!8cee336b":
-    label: Bench alarm
-  "!987ab80f":
     label: Garage alarm
+  "!987ab80f":
+    label: Bench alarm
 units:
   "!987ab80f":
     mode: dev

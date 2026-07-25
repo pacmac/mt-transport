@@ -47,7 +47,7 @@
         "keepaliveMs": 25000,
         "silenceCheckMs": 30000
       },
-      "store": { "defaultLimit": 200, "maxLimit": 1000 },
+      "store": { "defaultLimit": 200, "maxLimit": 1000, "keepPerUnit": 500 },
       "_schema_comment": "The config schema is a FILE generated at firmware build time from CONFIG_FIELDS and served instantly. STATIC per build, NEVER pulled over the radio \u2014 the old over-air pull was 7 round trips at 30-90s each and never once completed.",
       "schema": { "file": "/usr/share/pac/dev/pio/projects/pac-garage-alarm/docs/config-schema.json" },
       "butler": { "ttlMs": 86400000, "maxTries": 5, "maxPending": 10 },
@@ -67,9 +67,10 @@
       },
 
       "_devices_comment": "OUR alarm devices — the DECLARED half of the device registry behind GET /v1/mesh/devices. Distinct from 'units' below, which only holds live/dev overrides and so cannot answer 'is this ours'. Declaring a unit keeps it in the device list while it is ASLEEP; the other half is learned from 260/261 traffic and persisted. The gateway !2687afb1 is deliberately absent: it is our radio, not one of our devices.",
+      "_labels_comment": "LABELS ENCODE LOCATION and must be toggled on every physical swap, exactly like the short name. Inverted on 2026-07-25 when 8cee336b went to the garage and b80f came to the bench: only the short names and modes were switched. Verified against reported positions — 8cee336b is 2.501 km from b80f on bearing 301.2 deg (garage -> house).",
       "devices": {
-        "!8cee336b": { "label": "Bench alarm" },
-        "!987ab80f": { "label": "Garage alarm" }
+        "!8cee336b": { "label": "Garage alarm" },
+        "!987ab80f": { "label": "Bench alarm" }
       },
 
       "units": {

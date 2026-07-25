@@ -16,7 +16,10 @@ const DEFAULTS = Object.freeze({
   logLevel: 'info', // silent|error|warn|info|debug|trace ; env MTMESH_LOG overrides. See lib/log.js.
   paths:   { store: './payloads', log: './mtmesh.log' },
   // Ledger query paging — declared rather than baked into store.js.
-  store:   { defaultLimit: 200, maxLimit: 1000 },   // ledger query paging
+  // Ledger query paging, and retention. keepPerUnit caps SETTLED requests per unit and is
+  // applied once on connect; live rows (queued/trying) are never pruned — a command someone
+  // gave must not evaporate. Declared here, never a bare default at the call site.
+  store:   { defaultLimit: 200, maxLimit: 1000, keepPerUnit: 500 },
   // The config schema is a FILE generated at firmware build time from CONFIG_FIELDS —
   // static per build, and NEVER pulled over the radio (that was 7 round trips for data
   // that cannot change between builds). Path is config, never hardcoded.

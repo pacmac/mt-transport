@@ -64,6 +64,10 @@ const MIGRATIONS = [
   // 2 — threading: a reply carries the packet id it answers, so a RETRY keeps its thread
   //     instead of silently arriving as a standalone message.
   (db) => { db.exec('ALTER TABLE requests ADD COLUMN reply_id INTEGER'); },
+  // 3 — when the next attempt is due. Retries are gated on the unit's wake window, which
+  //     only this service knows, so without it a consumer cannot tell "next try in 30 s"
+  //     from "next try in 15 min". NULL means window-gated (unknowable), not "never".
+  (db) => { db.exec('ALTER TABLE requests ADD COLUMN next_try_at INTEGER'); },
 ];
 
 // Open (creating if needed) and bring the schema up to date. Returns the better-sqlite3

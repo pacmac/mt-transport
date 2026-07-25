@@ -18,7 +18,7 @@ function rowToEntry(r) {
     verb: r.verb, args: r.args ? JSON.parse(r.args) : [], body: r.body,
     toNum: r.to_num, channel: r.channel, replyId: r.reply_id,
     state: r.state, tries: r.tries, maxTries: r.max_tries,
-    createdAt: r.created_at, triedAt: r.tried_at, settledAt: r.settled_at,
+    createdAt: r.created_at, triedAt: r.tried_at, nextTryAt: r.next_try_at, settledAt: r.settled_at,
     ttlMs: r.ttl_ms,
     result: r.result ? safeParse(r.result) : null,
     error: r.error_code ? { code: r.error_code, message: r.error_msg || null } : null,
@@ -43,9 +43,9 @@ class PayloadStore {
       this.db.prepare('DELETE FROM requests WHERE unit = ?').run(String(unit));
       const ins = this.db.prepare(
         `INSERT INTO requests (id, unit, kind, verb, args, body, to_num, channel, reply_id, state, tries, max_tries,
-                               created_at, tried_at, settled_at, ttl_ms, result, error_code, error_msg)
+                               created_at, tried_at, next_try_at, settled_at, ttl_ms, result, error_code, error_msg)
          VALUES (@id, @unit, @kind, @verb, @args, @body, @to_num, @channel, @reply_id, @state, @tries, @max_tries,
-                 @created_at, @tried_at, @settled_at, @ttl_ms, @result, @error_code, @error_msg)`,
+                 @created_at, @tried_at, @next_try_at, @settled_at, @ttl_ms, @result, @error_code, @error_msg)`,
       );
       for (const r of rows) ins.run(r);
     });
@@ -217,6 +217,7 @@ class PayloadStore {
       max_tries: e.maxTries != null ? e.maxTries : (e.maxAttempts != null ? e.maxAttempts : 5),
       created_at: e.createdAt != null ? e.createdAt : (e.enqueuedAt || Date.now()),
       tried_at: e.triedAt != null ? e.triedAt : (e.sentAt || null),
+      next_try_at: e.nextTryAt != null ? e.nextTryAt : null,
       settled_at: e.settledAt != null ? e.settledAt : (e.ackedAt || null),
       ttl_ms: e.ttlMs != null ? e.ttlMs : null,
       result: e.result != null ? JSON.stringify(e.result) : (e.receipt != null ? JSON.stringify(e.receipt) : null),

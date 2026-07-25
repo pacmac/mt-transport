@@ -48,11 +48,40 @@ function memStore() {
     const b = new Butler({ deliver: async () => { n++; throw new Error('ETIMEOUT'); }, store, cfg: { butler: { maxTries: 2 } } });
     b.enqueue('!cc', 'ping', []);
     await b.onHeard('!cc');
-    ok(b.list('!cc')[0].state === 'queued' && b.list('!cc')[0].tries === 1, 'retry: back to pending after 1 fail');
+    // STAYS `trying` after a failed attempt — it does NOT drop back to `queued`. That is the
+    // whole point: `queued` must mean "not yet attempted" and nothing else, so a display
+    // showing the state alone cannot present a mid-retry command as untouched.
+    ok(b.list('!cc')[0].state === 'trying' && b.list('!cc')[0].tries === 1, 'retry: STAYS trying after 1 fail, not back to queued');
     await b.onHeard('!cc');
     const e = b.list('!cc')[0];
     ok(e.state === 'failed' && e.tries === 2 && e.error.message === 'ETIMEOUT', 'retry: failed after maxTries');
     ok(n === 2, 'retry: deliver called exactly maxTries times');
+  }
+
+  // 3b. Sticky `trying` must not strand a row: a RETRYING command stays cancellable and
+  //     stays expirable. Cancelling/expiring only `queued` — as the code did before
+  //     audit-260725a-truth — would make anything tried once immortal: uncancellable by a
+  //     person and never swept by its TTL.
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => { throw new Error('ETIMEOUT'); }, store, cfg: { butler: { maxTries: 5 } } });
+    const q = b.enqueue('!ee', 'ping', []);
+    await b.onHeard('!ee');
+    ok(b.list('!ee')[0].state === 'trying' && b.list('!ee')[0].tries === 1, 'cancel-while-retrying: precondition, row is mid-retry');
+    const c = b.cancel(q.id);
+    ok(c && c.state === 'cancelled', 'a RETRYING command can still be cancelled');
+    ok(b.list('!ee')[0].state === 'cancelled', 'cancel-while-retrying: persisted');
+  }
+  {
+    const store = memStore();
+    const b = new Butler({ deliver: async () => { throw new Error('ETIMEOUT'); }, store, cfg: { butler: { maxTries: 5 } } });
+    b.enqueue('!ff', 'ping', [], { ttlMs: 20 });
+    await b.onHeard('!ff');
+    ok(b.list('!ff')[0].state === 'trying', 'expire-while-retrying: precondition, row is mid-retry');
+    await new Promise((r) => setTimeout(r, 40));
+    await b.onHeard('!ff');                    // _sweep runs at the head of _deliverNext
+    const e = b.list('!ff')[0];
+    ok(e.state === 'expired' && e.error.code === 'expired', 'a RETRYING command still expires on its TTL');
   }
 
   // 4. TTL expiry — swept before firing, never delivered.
@@ -151,7 +180,7 @@ function memStore() {
     const b = new Butler({ deliver: async () => { n++; if (n === 1) throw new Error('timeout: reply not received'); return { ok: true }; }, store });
     const e = b.enqueue('!kk', 'ping', []);
     await sleep(10);
-    ok(b.get(e.id).state === 'queued', 'immediate: a failed immediate attempt returns to pending');
+    ok(b.get(e.id).state === 'trying', 'immediate: a failed immediate attempt STAYS trying (it is no longer untouched)');
     ok(b.get(e.id).tries === 1, 'immediate: the failed attempt is recorded');
     ok(b.get(e.id).error.code === 'no_reply', 'immediate: the error is recorded');
     await b.onHeard('!kk');
@@ -178,20 +207,28 @@ function memStore() {
   }
 
   // 13. A request interrupted by a restart must not be orphaned. It was mid-delivery when
-  //     the process died; nothing will ever settle it, so on load it goes back in the
-  //     queue rather than sitting in the outbox forever showing "in progress".
+  //     the process died, so nothing will ever settle it.
+  //     Since audit-260725a-truth `trying` is STICKY, so a row in that state on load is
+  //     either interrupted-mid-attempt or simply waiting for the next window — the two are
+  //     indistinguishable and resume identically. So the invariant under test is no longer
+  //     "what string does it hold" but the thing that actually matters: IT STILL GETS
+  //     DELIVERED, and its used try is still counted.
   {
     const store = memStore();
     store.saveQueue('!mm', [{
       id: 'orphan.0', unit: '!mm', kind: 'command', verb: 'ping', args: [],
       state: 'trying', createdAt: Date.now(), ttlMs: 86400000,
-      tries: 1, maxTries: 5, triedAt: Date.now(), settledAt: null, result: null, error: null,
+      tries: 1, maxTries: 5, triedAt: Date.now(), nextTryAt: 999, settledAt: null, result: null, error: null,
     }]);
-    const b = new Butler({ deliver: async () => ({ ok: true }), store });
-    const e = b.get('orphan.0');
-    ok(e.state === 'queued', 'restart: an interrupted "trying" request returns to the queue');
-    ok(e.tries === 1, 'restart: the try it already used is still counted');
-    ok(store.loadQueue('!mm')[0].state === 'queued', 'restart: the recovery is persisted');
+    let delivered = 0;
+    const b = new Butler({ deliver: async () => { delivered++; return { ok: true }; }, store });
+    ok(b.get('orphan.0').tries === 1, 'restart: the try it already used is still counted');
+    ok(b.get('orphan.0').nextTryAt === null,
+       'restart: nextTryAt is cleared — it was computed by a process that no longer exists');
+    await b.onHeard('!mm');
+    ok(delivered === 1, 'restart: an interrupted request IS retried, not orphaned');
+    ok(b.get('orphan.0').state === 'done' && b.get('orphan.0').tries === 2, 'restart: it settles normally');
+    ok(store.loadQueue('!mm')[0].state === 'done', 'restart: the outcome is persisted');
   }
 
   // ---- flood guards (spec: butler-collapse-duplicates) --------------------------------

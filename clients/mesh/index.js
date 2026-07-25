@@ -134,6 +134,15 @@ class Mesh extends EventEmitter {
     //     since the last restart has sent us nothing.
     for (const id of Object.keys(this.cfg.devices || {})) this._ours.add(id);
     for (const id of this.images.store.loadDevices()) this._ours.add(id);
+    // Retention, applied ONCE on connect. pruneRequests() existed since the SQLite cutover
+    // but had no caller outside a test, so the ledger grew without bound (150 rows for one
+    // unit in a day). It only removes SETTLED rows — a queued or retrying command is an
+    // instruction someone gave and is never pruned (audit-260725a-truth).
+    try {
+      const pruned = this.images.store.pruneRequests(this.cfg.store.keepPerUnit);
+      if (pruned) log.info('ledger: pruned %d settled request(s), keeping %d per unit',
+        pruned, this.cfg.store.keepPerUnit);
+    } catch (e) { log.warn('ledger: prune skipped — %s', e.message); }
     this.gw.onEvent((ev) => this._onEvent(ev));
     log.debug('connecting to gw %s (gwId %s, channel %d)', this.cfg.gw.host, this.gwId, this.channel);
     await this.gw.connect();
@@ -231,9 +240,14 @@ class Mesh extends EventEmitter {
       const m = this.model.node(id) || {};
       const pos = (r && r.raw && r.raw.position) || null;
       const name = r ? r.name : null;
-      // The firmware puts the build in the long name as "<suffix> <version>". Parse it
-      // if it matches and leave it null otherwise — never guess a version.
-      const fwMatch = typeof name === 'string' ? name.match(/^[0-9a-f]{4}\s+(\S+)$/i) : null;
+      // The firmware appends the build to the long name as "<prefix> <version>", where the
+      // prefix is the role name ("Garage", "Bench") or, when the role name has NOT been
+      // applied, the 4-hex id fallback. ANCHOR ON THE VERSION SHAPE, NEVER THE PREFIX: the
+      // old /^[0-9a-f]{4}\s+(\S+)$/ demanded the hex fallback, so it parsed ONLY units whose
+      // name was broken and returned null for every correctly-named one — silently disabling
+      // the schema staleness check on the deployed unit (audit-260725a-truth).
+      // Still null when it does not match: never guess a version.
+      const fwMatch = typeof name === 'string' ? name.match(/(?:^|\s)(\d+-\d{6}-\d+)\s*$/) : null;
       return {
         id,
         num: r ? r.num : null,
@@ -245,7 +259,7 @@ class Mesh extends EventEmitter {
         // list because it is sleeping is precisely what this route exists to prevent.
         present: !!r,
         mode: this.unitMode(id),
-        awake: this.unitMode(id) === 'dev',
+        awake: this._awake(id),
         slp: m.slp != null ? m.slp : null,
         lastHeard: r ? r.lastHeard : null,
         lastHeardMs: m.lastHeardMs || null,
@@ -353,6 +367,19 @@ class Mesh extends EventEmitter {
   // ---- live/dev mode (per-unit command routing) ----
   // Resolve a unit's interaction mode. First match wins: explicit config override,
   // then the device's known sleep state, then last-heard silence, else dev.
+  // AWAKE IS A MEASUREMENT, NOT A SETTING. Heard within mode.silentMs => awake. Never heard
+  // at all => null, meaning UNKNOWN — not false. It must NEVER come from unitMode(), which
+  // returns the operator's routing override (cfg.units[id].mode) and says nothing whatever
+  // about the device: a unit sitting awake on the desk read `awake:false` purely because
+  // someone had typed "mode":"live" in a config file (audit-260725a-truth).
+  // `slp` stays SEPARATE — that is the device's sleep SETTING, not its current state, and
+  // collapsing the two is what produced this bug.
+  _awake(id) {
+    const n = this.model.node(id);
+    if (!n || !n.lastHeardMs) return null;
+    return Date.now() - n.lastHeardMs <= this.cfg.mode.silentMs;
+  }
+
   unitMode(id) {
     const u = (this.cfg.units && this.cfg.units[id]) || {};
     if (u.mode === 'dev' || u.mode === 'live') return u.mode;   // operator override
@@ -424,7 +451,7 @@ class Mesh extends EventEmitter {
     const id = await this._unitKey(target);
     const n = this.model.node(id) || {};
     const mode = this.unitMode(id);
-    return { id, mode, lastHeardMs: n.lastHeardMs || null, slp: n.slp != null ? n.slp : null, awake: mode === 'dev' };
+    return { id, mode, lastHeardMs: n.lastHeardMs || null, slp: n.slp != null ? n.slp : null, awake: this._awake(id) };
   }
 
   // Set (or clear, with 'auto') a unit's mode override — persisted to config.yaml AND applied to

@@ -44,8 +44,13 @@ class Butler extends EventEmitter {
       // died with it and nothing will ever settle the row, so it would sit in the outbox
       // forever showing "in progress". Put it back in the queue — the try is already
       // counted, so it costs a retry, not a lost instruction.
+      // `trying` is now STICKY between attempts (audit-260725a-truth), so a row in that
+      // state on load is either mid-attempt-when-we-died or simply waiting for the next
+      // window — indistinguishable, and both resume identically. Leave the state alone and
+      // just clear nextTryAt: whatever it said was computed by a process that no longer
+      // exists. _deliverNext picks `trying` rows up, so nothing is stranded.
       let recovered = 0;
-      for (const e of entries) if (e.state === 'trying') { e.state = 'queued'; recovered++; }
+      for (const e of entries) if (e.state === 'trying') { e.nextTryAt = null; recovered++; }
       this._q.set(unit, entries);
       if (recovered) {
         this.log.info('butler: recovered %d interrupted request(s) for %s', recovered, unit);
@@ -105,7 +110,10 @@ class Butler extends EventEmitter {
       state: 'queued', createdAt: Date.now(),
       ttlMs: opts.ttlMs != null ? opts.ttlMs : this.ttlMs,
       tries: 0, maxTries: opts.maxTries != null ? opts.maxTries : (opts.maxAttempts != null ? opts.maxAttempts : this.maxTries),
-      triedAt: null, settledAt: null, result: null, error: null,
+      // nextTryAt: when the next attempt is due, or null when it is gated on the unit's
+      // wake window and therefore unknowable. Only WE know that, so a consumer cannot tell
+      // "next attempt in 30 s" from "next attempt in 15 min" without it.
+      triedAt: null, nextTryAt: null, settledAt: null, result: null, error: null,
     };
     this._entries(unit).push(entry);
     this._persist(unit);
@@ -142,7 +150,12 @@ class Butler extends EventEmitter {
   get(id) { for (const [, e] of this._q) { const f = e.find((x) => x.id === id); if (f) return f; } return null; }
   cancel(id) {
     for (const [unit, e] of this._q) {
-      const f = e.find((x) => x.id === id && x.state === 'queued');
+      // Must reach a RETRYING row too, not just an untouched one: `trying` is sticky
+      // between attempts, so cancelling only `queued` would make anything that had been
+      // tried once permanently uncancellable (audit-260725a-truth). The inflight guard is
+      // what keeps us from cancelling a row whose send is actually in the air right now.
+      const f = e.find((x) => x.id === id
+        && (x.state === 'queued' || (x.state === 'trying' && !this.inflight.has(unit))));
       if (f) { f.state = 'cancelled'; f.settledAt = Date.now(); this._persist(unit); this.emit('cancelled', f); return f; }
     }
     return null;
@@ -151,7 +164,12 @@ class Butler extends EventEmitter {
   _sweep(unit, now) {
     let changed = false;
     for (const e of this._entries(unit)) {
-      if (e.state === 'queued' && now - e.createdAt > e.ttlMs) {
+      // Sticky `trying` must expire too. Expiring only `queued` would mean a command that
+      // failed its first attempt outlives its TTL forever, retrying until maxTries however
+      // stale it has become (audit-260725a-truth). Never expire a row mid-attempt: the
+      // delivery in flight is about to settle it either way.
+      if ((e.state === 'queued' || (e.state === 'trying' && !this.inflight.has(unit)))
+          && now - e.createdAt > e.ttlMs) {
         e.state = 'expired'; e.settledAt = now;
         e.error = { code: 'expired', message: 'not delivered before its time limit' };
         changed = true; this.emit('expired', e);
@@ -172,10 +190,14 @@ class Butler extends EventEmitter {
     if (!unit || this.inflight.has(unit)) return;
     const now = Date.now();
     this._sweep(unit, now);
-    const next = this._entries(unit).find((e) => e.state === 'queued');
+    // `trying` is sticky between attempts, so a retrying row sits in that state waiting for
+    // the next window — it must be selectable here or it would never be retried. The
+    // inflight set (not the state field) is the concurrency lock; it is added below and
+    // released in the finally, so this can never pick a row whose send is actually in air.
+    const next = this._entries(unit).find((e) => e.state === 'queued' || e.state === 'trying');
     if (!next) return;
     this.inflight.add(unit);
-    next.state = 'trying'; next.tries++; next.triedAt = Date.now();
+    next.state = 'trying'; next.tries++; next.triedAt = Date.now(); next.nextTryAt = null;
     this._persist(unit);
     this.emit('trying', next);
     this.log.info('butler: %s — delivering %s for %s (try %d)',
@@ -202,7 +224,13 @@ class Butler extends EventEmitter {
         next.state = 'failed'; next.settledAt = Date.now();
         this.emit('failed', next);
       } else {
-        next.state = 'queued';   // back in the queue — retry on the next window
+        // STAYS `trying`. It used to drop back to 'queued', which made that one word mean
+        // both "never attempted" and "3 of 5 attempts made" — so /control showed a ping as
+        // "29m ago, queued" while it was actually mid-retry with an attempt 9 minutes
+        // earlier (audit-260725a-truth). `queued` now means exactly "not yet attempted".
+        // nextTryAt stays null: the retry is gated on the unit transmitting, and we cannot
+        // know when that will be. Null here means "on its next wake window", not "never".
+        next.state = 'trying'; next.nextTryAt = null;
       }
       this.log.warn('butler: delivery failed for %s: %s (try %d/%d)', unit, next.error.message, next.tries, next.maxTries);
     } finally {
