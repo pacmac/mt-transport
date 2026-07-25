@@ -1,6 +1,60 @@
 {
+  "_comment": "pac-host config. Replaces the separate mtmesh + trial-logger PM2 apps. PATHS ARE ABSOLUTE ON PURPOSE: mtmesh resolved './payloads' against its own cwd, so under a shared host a relative path would silently move the butler queue and image store to a new directory. Under this host, cwd belongs to the host.",
+
   "logLevel": "info",
-  "http": { "host": "127.0.0.1", "port": 8788 },
+  "http": { "host": "127.0.0.1", "port": 8787 },
   "events": { "bufferSize": 500 },
-  "modules": {}
+
+  "modules": {
+    "mesh": {
+      "require": "/usr/share/pac/dev/pio/projects/mt-transport/clients/mesh/host-module.js",
+
+      "gw": {
+        "host": "localhost",
+        "port": 8001,
+        "sendPort": 8001,
+        "eventsPath": "/events",
+        "gatewayId": "!2687afb1"
+      },
+      "channel": 2,
+      "logLevel": "info",
+
+      "paths": {
+        "store": "/usr/share/pac/dev/pio/projects/mt-transport/clients/mesh/payloads",
+        "log": "/usr/share/pac/dev/pio/projects/mt-transport/clients/mesh/mtmesh.log"
+      },
+
+      "dm": { "default": true, "fallbackChannel": 2, "omitAddress": false },
+
+      "timing": {
+        "sendSpacingMs": 3000,
+        "replyTimeoutMs": 20000,
+        "wsMaxPayload": 0,
+        "chunkAnswerMs": 8000,
+        "idleMs": 240000,
+        "pushDeadlineMs": 900000,
+        "pushQuietMs": 15000
+      },
+      "retry": { "commands": false, "idempotent": 2, "attemptTimeoutMs": 10000 },
+      "listen": { "autoFetchImages": true, "alerts": ["motion", "fault"] },
+
+      "notify": {
+        "transports": { "console": { "enabled": true } },
+        "routes": { "motion": ["console"], "fault": ["console"] }
+      },
+
+      "units": {
+        "!987ab80f": { "mode": "dev" },
+        "!8cee336b": { "mode": "live" }
+      },
+
+      "daemon": { "serve": false }
+    },
+
+    "recorder": {
+      "require": "/usr/share/pac/dev/pio/projects/mt-transport/clients/trial-logger/recorder.js",
+      "wsUrl": "ws://localhost:8001/events",
+      "dataDir": "/usr/share/pac/dev/pio/projects/pac-garage-alarm/data"
+    }
+  }
 }
